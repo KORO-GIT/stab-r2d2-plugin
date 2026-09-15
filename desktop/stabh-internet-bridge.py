@@ -34,7 +34,10 @@ class R2D2Transport:
         self.session: ClientSession | None = None
         self.websocket = None
         self.plugin_source: int | None = None
+        self.vpn: str | None = None
+        self.routing_locked = False
         self.ready = asyncio.Event()
+        self.session_ready = asyncio.Event()
         self.pending: dict[str, asyncio.Queue] = {}
         self.task: asyncio.Task | None = None
         self.send_lock = asyncio.Lock()
@@ -60,11 +63,14 @@ class R2D2Transport:
         self.pending.pop(request_id, None)
 
     async def wait_ready(self, timeout: float = 30.0) -> bool:
-        if self.ready.is_set() and self.plugin_source is not None:
+        if self.ready.is_set() and self.session_ready.is_set() and self.plugin_source is not None:
             return True
         try:
-            await asyncio.wait_for(self.ready.wait(), timeout)
-            return self.plugin_source is not None
+            await asyncio.wait_for(
+                asyncio.gather(self.ready.wait(), self.session_ready.wait()),
+                timeout,
+            )
+            return self.plugin_source is not None and self.vpn is not None
         except asyncio.TimeoutError:
             return False
 
@@ -73,24 +79,33 @@ class R2D2Transport:
             raise ConnectionError("R2D2 plugin is not connected")
         websocket = self.websocket
         destination = self.plugin_source
-        if websocket is None or destination is None or websocket.closed:
+        vpn = self.vpn
+        if websocket is None or destination is None or not vpn or websocket.closed:
             raise ConnectionError("R2D2 ground station is not connected")
         frame = {
             "PT": "plugin.ctl",
-            "dst": destination,
+            "VPN": vpn,
             "PKTFLAG-force-delivery": True,
-            "plugin": PLUGIN_LABEL,
             "cmd": command,
             "arg": argument,
         }
+        destinations = [destination]
+        if not self.routing_locked and command in {"stabh.http", "stabh.ws.open"}:
+            # Old R2D2 Internet builds may rewrite the source announced by a
+            # TGZ process to one of the adjacent local service addresses.
+            destinations = list(dict.fromkeys([destination, 65606, 65607, 65608, 65609]))
         async with self.send_lock:
-            await websocket.send_json(frame)
+            for candidate in destinations:
+                await websocket.send_json({**frame, "dst": candidate})
 
     async def _connection_loop(self) -> None:
         assert self.session is not None
         while True:
             self.ready.clear()
+            self.session_ready.clear()
             self.plugin_source = None
+            self.vpn = None
+            self.routing_locked = False
             try:
                 async with self.session.ws_connect(
                     self.url,
@@ -99,6 +114,7 @@ class R2D2Transport:
                 ) as websocket:
                     self.websocket = websocket
                     print(f"INFO: connected to R2D2 ground station at {self.url}", flush=True)
+                    await websocket.send_json({"PT": "api.getSessionForMap"})
                     async for message in websocket:
                         if message.type not in (WSMsgType.TEXT, WSMsgType.BINARY):
                             continue
@@ -107,16 +123,34 @@ class R2D2Transport:
                             frame = json.loads(raw)
                         except (UnicodeError, ValueError):
                             continue
+                        if frame.get("PT") == "api.getSessionForMap.resp":
+                            if frame.get("success"):
+                                self.session_ready.set()
+                                print("INFO: R2D2 browser session authorized", flush=True)
+                            continue
                         if frame.get("PT") != "plugin.ctl" or frame.get("plugin") != PLUGIN_LABEL:
                             continue
                         if frame.get("announce") and frame.get("src") is not None:
                             source = int(frame["src"])
-                            if source != self.plugin_source:
+                            vpn = str(frame.get("VPN", ""))
+                            if source != self.plugin_source or vpn != self.vpn:
                                 self.plugin_source = source
+                                self.vpn = vpn or None
                                 self.ready.set()
-                                print(f"INFO: StabX plugin found on R2D2 source {source}", flush=True)
+                                print(
+                                    f"INFO: StabX plugin found on {self.vpn or 'unknown board'} "
+                                    f"source {source}",
+                                    flush=True,
+                                )
                         event = frame.get("tunnel")
                         if isinstance(event, dict):
+                            if frame.get("src") is not None and not self.routing_locked:
+                                self.plugin_source = int(frame["src"])
+                                self.routing_locked = True
+                                print(
+                                    f"INFO: R2D2 command route confirmed at source {self.plugin_source}",
+                                    flush=True,
+                                )
                             queue = self.pending.get(str(event.get("id", "")))
                             if queue is not None:
                                 await queue.put(event)
@@ -127,7 +161,10 @@ class R2D2Transport:
             finally:
                 self.websocket = None
                 self.ready.clear()
+                self.session_ready.clear()
                 self.plugin_source = None
+                self.vpn = None
+                self.routing_locked = False
                 for queue in list(self.pending.values()):
                     await queue.put({"kind": "error", "message": "R2D2 connection lost"})
             await asyncio.sleep(2)
@@ -142,9 +179,10 @@ class LocalProxy:
         if request.path == "/__r2_stabh_bridge/status":
             return web.json_response(
                 {
-                    "ok": self.transport.ready.is_set(),
+                    "ok": self.transport.ready.is_set() and self.transport.session_ready.is_set(),
                     "r2d2": self.transport.url,
                     "plugin_source": self.transport.plugin_source,
+                    "vpn": self.transport.vpn,
                     "target_port": self.target_port,
                 },
                 status=200 if self.transport.ready.is_set() else 503,

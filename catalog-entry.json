@@ -12,10 +12,10 @@
   },
   "versions": [
     {
-      "version": "0.1.3",
-      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.1.3/stabh-r2d2-plugin-0.1.3.tgz",
+      "version": "0.1.4",
+      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.1.4/stabh-r2d2-plugin-0.1.4.tgz",
       "description": "Два HTTP/POST reverse proxy для портів StabX 8080 і 5050, віддалений тунель R2D2, WebSocket, перевірка доступності та необов'язкова Basic-авторизація.",
-      "whatsNew": "Додано діагностику Wi-Fi: у логах видно локальні мережі R2D2, DHCP/ARP-клієнтів і результат пошуку окремо для портів 8080 та 5050. Для широких масок безпечно сканується /24 навколо адреси R2D2.",
+      "whatsNew": "Сумісність зі старим Інтернет-реле R2D2: відповіді тунелю повертаються через штатний наземний канал 1000, навіть якщо реле не додало поле src до команди. Збережено діагностику Wi-Fi та автопошук StabX.",
       "configSchema": {
         "type": "object",
         "additionalProperties": false,

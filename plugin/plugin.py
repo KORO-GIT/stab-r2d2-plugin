@@ -29,7 +29,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
@@ -793,7 +793,11 @@ class R2RemoteTunnel:
         arg = frame.get("arg") if isinstance(frame.get("arg"), dict) else {}
         request_id = str(arg.get("id", ""))[:80]
         target_port = _port(arg.get("port"), 0)
-        source = int(frame.get("src", 0))
+        # Some older R2D2 Internet relays remove `src` from frames forwarded
+        # to a TGZ process.  Replies addressed to the documented ground
+        # endpoint 1000 are still delivered to every desktop WebSocket;
+        # request IDs let the intended bridge select its own response.
+        source = int(frame.get("src") or R2_GROUND)
         return source, request_id, arg, target_port
 
     async def _send(self, destination: int, fields: dict) -> None:
