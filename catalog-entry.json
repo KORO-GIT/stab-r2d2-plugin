@@ -25,6 +25,18 @@
             "title": "Адреси StabX",
             "default": "pizero2,pizero2.local"
           },
+          "AUTO_DISCOVER": {
+            "type": "boolean",
+            "title": "Автоматично знаходити IP StabX",
+            "default": true
+          },
+          "DISCOVERY_INTERVAL": {
+            "type": "number",
+            "title": "Інтервал повторного пошуку, секунд",
+            "minimum": 10,
+            "maximum": 600,
+            "default": 60
+          },
           "TARGET_PORT": {
             "type": "integer",
             "title": "Порт StabX",
@@ -90,6 +102,7 @@
         },
         "required": [
           "TARGET_HOSTS",
+          "AUTO_DISCOVER",
           "TARGET_PORT",
           "LISTEN_PORT",
           "SECONDARY_TARGET_PORT",
@@ -108,10 +121,14 @@
           "PROXY_USERNAME",
           "PROXY_PASSWORD",
           "CONNECT_TIMEOUT",
+          "DISCOVERY_INTERVAL",
           "REWRITE_ABSOLUTE_URLS"
         ],
         "TARGET_HOSTS": {
           "ui:help": "Плагін перевіряє адреси зліва направо. Якщо імена не визначаються, вкажіть IP Raspberry Pi Zero."
+        },
+        "AUTO_DISCOVER": {
+          "ui:help": "Якщо ім'я pizero2 не визначається, плагін шукає StabX у DHCP/ARP та локальних /24 мережах."
         },
         "LISTEN_PORT": {
           "ui:help": "Вебінтерфейс буде доступний на цьому TCP-порту IP-адреси R2D2."
@@ -135,12 +152,16 @@
         "CONNECT_TIMEOUT": {
           "ui:advanced": true
         },
+        "DISCOVERY_INTERVAL": {
+          "ui:advanced": true
+        },
         "REWRITE_ABSOLUTE_URLS": {
           "ui:advanced": true
         }
       },
       "defaultConfig": {
         "TARGET_HOSTS": "pizero2,pizero2.local",
+        "AUTO_DISCOVER": true,
         "TARGET_PORT": 8080,
         "LISTEN_PORT": 18080,
         "SECONDARY_TARGET_PORT": 5050,
@@ -150,6 +171,7 @@
         "PROXY_USERNAME": "",
         "PROXY_PASSWORD": "",
         "CONNECT_TIMEOUT": 5.0,
+        "DISCOVERY_INTERVAL": 60,
         "REWRITE_ABSOLUTE_URLS": true
       },
       "presets": [],

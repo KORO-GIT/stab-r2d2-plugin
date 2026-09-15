@@ -8,6 +8,8 @@
       "log_persist": false,
       "config": {
         "TARGET_HOSTS": "pizero2,pizero2.local",
+        "AUTO_DISCOVER": true,
+        "DISCOVERY_INTERVAL": 60,
         "TARGET_PORT": 8080,
         "LISTEN_PORT": 18080,
         "SECONDARY_TARGET_PORT": 5050,
