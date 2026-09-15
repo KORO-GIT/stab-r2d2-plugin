@@ -12,10 +12,10 @@
   },
   "versions": [
     {
-      "version": "0.1.1",
+      "version": "0.1.2",
       "url": "",
       "description": "Два HTTP/POST reverse proxy для портів StabX 8080 і 5050, віддалений тунель R2D2, WebSocket, перевірка доступності та необов'язкова Basic-авторизація.",
-      "whatsNew": "Додано порт StabX 5050 та віддалений доступ через Інтернет-канал R2D2. Реєстр змінено на registry-1.docker.io, щоб публічний образ завантажувався без пошкодженого auth.json для docker.io.",
+      "whatsNew": "Додано автоматичний пошук IP StabX через DHCP/ARP і локальні /24 мережі, захист TGZ від подвійного запуску та самодостатній TGZ-архів для старих завантажувачів R2D2.",
       "configSchema": {
         "type": "object",
         "additionalProperties": false,

@@ -176,6 +176,13 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(secondary.target_port, 5050)
         self.assertEqual(secondary.listen_port, 15050)
+        self.assertTrue(secondary.auto_discover)
+
+    def test_private_ipv4_filter(self) -> None:
+        self.assertTrue(plugin._private_ipv4("192.168.4.2"))
+        self.assertTrue(plugin._private_ipv4("10.42.0.7"))
+        self.assertFalse(plugin._private_ipv4("127.0.0.1"))
+        self.assertFalse(plugin._private_ipv4("8.8.8.8"))
 
     async def test_r2d2_remote_http_tunnel(self) -> None:
         config = self.config()

@@ -13,6 +13,7 @@ import base64
 import binascii
 import contextlib
 import hmac
+import ipaddress
 import json
 import os
 import signal
@@ -56,6 +57,10 @@ TEXT_TYPES = (
     "application/xml",
     "application/xhtml+xml",
 )
+PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+DISCOVERED_ADDRESSES: set[str] = set()
 
 
 def log(level: str, message: str) -> None:
@@ -111,6 +116,86 @@ def _bool(value: object, default: bool) -> bool:
     return default
 
 
+def _private_ipv4(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return isinstance(address, ipaddress.IPv4Address) and any(
+        address in network for network in PRIVATE_NETWORKS
+    )
+
+
+def _neighbor_candidates() -> tuple[str, ...]:
+    """Return likely local peers from DHCP leases and the kernel ARP cache."""
+    candidates: list[str] = []
+    lease_paths = (
+        "/var/lib/misc/dnsmasq.leases",
+        "/var/lib/dnsmasq/dnsmasq.leases",
+        "/run/dnsmasq/dnsmasq.leases",
+        "/tmp/dnsmasq.leases",
+    )
+    for path in lease_paths:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as stream:
+                rows = stream.readlines()
+        except OSError:
+            continue
+        preferred: list[str] = []
+        other: list[str] = []
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 3 or not _private_ipv4(fields[2]):
+                continue
+            hostname = fields[3].lower() if len(fields) > 3 else ""
+            (preferred if any(token in hostname for token in ("pizero", "stab", "rasp")) else other).append(
+                fields[2]
+            )
+        candidates.extend(preferred)
+        candidates.extend(other)
+
+    try:
+        with open("/proc/net/arp", "r", encoding="ascii", errors="replace") as stream:
+            for row in stream.readlines()[1:]:
+                fields = row.split()
+                if fields and _private_ipv4(fields[0]):
+                    candidates.append(fields[0])
+    except OSError:
+        pass
+
+    candidates.extend(sorted(DISCOVERED_ADDRESSES))
+    return tuple(dict.fromkeys(candidates))
+
+
+def _local_ipv4_networks() -> tuple[tuple[ipaddress.IPv4Network, str], ...]:
+    """Enumerate small RFC1918 networks without depending on the `ip` command."""
+    if os.name != "posix":
+        return ()
+    try:
+        import fcntl
+    except ImportError:
+        return ()
+
+    output: list[tuple[ipaddress.IPv4Network, str]] = []
+    for _, name in socket.if_nameindex():
+        if name == "lo":
+            continue
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            request = struct.pack("256s", name.encode("utf-8")[:15])
+            address = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), 0x8915, request)[20:24])
+            netmask = socket.inet_ntoa(fcntl.ioctl(probe.fileno(), 0x891B, request)[20:24])
+            network = ipaddress.ip_network(f"{address}/{netmask}", strict=False)
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        if not _private_ipv4(address) or network.prefixlen < 24:
+            continue
+        output.append((network, address))
+    return tuple(output[:4])
+
+
 @dataclass(frozen=True)
 class Config:
     target_hosts: tuple[str, ...]
@@ -126,6 +211,8 @@ class Config:
     proxy_password: str
     remote_tunnel_enabled: bool
     remote_max_response_bytes: int
+    auto_discover: bool
+    discovery_interval: float
 
     @classmethod
     def from_dict(
@@ -157,6 +244,8 @@ class Config:
             remote_max_response_bytes=_positive_int(
                 raw.get("REMOTE_MAX_RESPONSE_BYTES"), 4 * 1024 * 1024
             ),
+            auto_discover=_bool(raw.get("AUTO_DISCOVER"), True),
+            discovery_interval=_positive_float(raw.get("DISCOVERY_INTERVAL"), 60.0),
         )
 
 
@@ -184,6 +273,7 @@ class StabXProxy:
         self._resolve_lock = asyncio.Lock()
         self._last_online: bool | None = None
         self._monitor_task: asyncio.Task | None = None
+        self._next_discovery = 0.0
 
     async def start(self) -> None:
         timeout = ClientTimeout(
@@ -251,25 +341,73 @@ class StabXProxy:
 
                 addresses = list(dict.fromkeys(result[4][0] for result in results))
                 for address in addresses:
-                    try:
-                        reader, writer = await asyncio.wait_for(
-                            asyncio.open_connection(address, self.config.target_port),
-                            timeout=self.config.connect_timeout,
-                        )
-                        writer.close()
-                        with contextlib.suppress(Exception):
-                            await writer.wait_closed()
-                        del reader
-                    except (OSError, asyncio.TimeoutError):
+                    if not await self._probe_address(address):
                         continue
                     target = Target(hostname, address, self.config.target_port)
                     self._target = target
                     self._target_until = time.monotonic() + self.config.dns_cache_seconds
                     return target
 
+            if self.config.auto_discover and time.monotonic() >= self._next_discovery:
+                self._next_discovery = time.monotonic() + self.config.discovery_interval
+                target = await self._discover_target()
+                if target is not None:
+                    self._target = target
+                    self._target_until = time.monotonic() + self.config.dns_cache_seconds
+                    DISCOVERED_ADDRESSES.add(target.address)
+                    log("INFO", f"auto-discovered StabX at {target.address}:{target.port}")
+                    return target
+
             self._target = None
             self._target_until = time.monotonic() + min(self.config.dns_cache_seconds, 3.0)
             return None
+
+    async def _probe_address(self, address: str, timeout: float | None = None) -> bool:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(address, self.config.target_port),
+                timeout=timeout or self.config.connect_timeout,
+            )
+            writer.close()
+            with contextlib.suppress(Exception):
+                await writer.wait_closed()
+            del reader
+            return True
+        except (OSError, asyncio.TimeoutError):
+            return False
+
+    async def _discover_target(self) -> Target | None:
+        for address in _neighbor_candidates():
+            if await self._probe_address(address, timeout=0.35):
+                return Target(self.config.target_hosts[0], address, self.config.target_port)
+
+        addresses: list[str] = []
+        for network, own_address in _local_ipv4_networks():
+            for address in network.hosts():
+                value = str(address)
+                if value != own_address:
+                    addresses.append(value)
+        addresses = list(dict.fromkeys(addresses))[:1020]
+        if not addresses:
+            return None
+
+        semaphore = asyncio.Semaphore(64)
+
+        async def scan(address: str) -> str | None:
+            async with semaphore:
+                return address if await self._probe_address(address, timeout=0.2) else None
+
+        tasks = [asyncio.create_task(scan(address)) for address in addresses]
+        try:
+            for task in asyncio.as_completed(tasks):
+                address = await task
+                if address is not None:
+                    return Target(self.config.target_hosts[0], address, self.config.target_port)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        return None
 
     def invalidate_target(self) -> None:
         self._target = None

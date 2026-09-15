@@ -61,15 +61,15 @@ WebSocket. Абсолютные ссылки на `pizero2:8080` перепис�
 1. Войдите в Docker Hub командой `docker login` под пользователем `koropwnz`.
 2. На компьютере с Docker откройте PowerShell в папке `plugin`.
 3. Выполните `./publish.ps1`. Скрипт соберёт и опубликует
-   `koropwnz/stab-r2d2-plugin:0.1.1` для `linux/arm64` и `linux/amd64`.
+   `koropwnz/stab-r2d2-plugin:0.1.2` для `linux/arm64` и `linux/amd64`.
    Эквивалент для Git Bash или WSL: `bash build.sh`.
-4. Команда `docker push koropwnz/stab-r2d2-plugin:0.1.1` подходит только тогда,
+4. Команда `docker push koropwnz/stab-r2d2-plugin:0.1.2` подходит только тогда,
    когда мультиархитектурный образ уже собран и помечен этим тегом.
 5. В веб-админке откройте «Мои плагины» и создайте запись из
    `catalog-entry.json`.
 6. В форме укажите registry `registry-1.docker.io`, а в поле «Ключ» укажите
    `koropwnz/stab-r2d2-plugin`. Предпросмотр должен показать
-   `registry-1.docker.io/koropwnz/stab-r2d2-plugin:0.1.1`.
+   `registry-1.docker.io/koropwnz/stab-r2d2-plugin:0.1.2`.
 7. Скопируйте ID записи.
 8. На наземной станции откройте «Плагины» -> «Добавить мой плагин», вставьте ID,
    включите плагин и сохраните настройки.
@@ -77,7 +77,7 @@ WebSocket. Абсолютные ссылки на `pizero2:8080` перепис�
 
 Для ручной установки образа запустите `plugin/export-arm64.ps1`. Полученный TAR
 имеет правильный внутренний тег
-`koropwnz/stab-r2d2-plugin:0.1.1`; загружать его на борт нужно по
+`koropwnz/stab-r2d2-plugin:0.1.2`; загружать его на борт нужно по
 процедуре «Способ В» из инструкции R2D2.
 
 ## Подключение

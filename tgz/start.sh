@@ -5,6 +5,21 @@ PLUGIN_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PYTHON=${PYTHON:-python3}
 PYVER=$($PYTHON -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')
 VENDOR_DIR="$PLUGIN_DIR/vendor$PYVER"
+PIDFILE=/tmp/koropwnz-stab-r2d2-plugin.pid
+
+if [ -r "$PIDFILE" ]; then
+    OLD_PID=$(cat "$PIDFILE" 2>/dev/null || true)
+    case "$OLD_PID" in
+        ''|*[!0-9]*) ;;
+        *)
+            if kill -0 "$OLD_PID" 2>/dev/null; then
+                kill "$OLD_PID" 2>/dev/null || true
+                sleep 1
+            fi
+            ;;
+    esac
+fi
+echo "$$" > "$PIDFILE"
 
 export PYTHONUNBUFFERED=1
 export PYTHONDONTWRITEBYTECODE=1
@@ -37,4 +52,3 @@ if ! $PYTHON -c 'import aiohttp' >/dev/null 2>&1; then
 fi
 
 exec $PYTHON "$PLUGIN_DIR/plugin.py"
-
