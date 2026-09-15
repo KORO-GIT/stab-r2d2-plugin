@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
+import os
 import struct
 import sys
 import unittest
@@ -220,6 +223,63 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if event["kind"] == "http.body" and event["data"]
         ).decode("utf-8")
         self.assertIn("http://127.0.0.1:18080/next", body)
+
+    async def test_terminal_is_disabled_by_default(self) -> None:
+        config = self.config()
+        self.assertFalse(config.terminal_enabled)
+        self.assertEqual(config.terminal_token, "")
+        tunnel = plugin.R2RemoteTunnel((config,))
+        writer = MemoryWriter()
+        tunnel.writer = writer
+        await tunnel._handle_shell(
+            {
+                "PT": "plugin.ctl",
+                "src": 4567,
+                "cmd": "r2shell.exec",
+                "arg": {
+                    "id": "terminal-disabled",
+                    "session": "test",
+                    "command": "id",
+                    "auth": "invalid",
+                },
+            }
+        )
+        event = writer.frames()[0]["tunnel"]
+        self.assertEqual(event["kind"], "error")
+        self.assertIn("disabled", event["message"])
+
+    async def test_terminal_hmac_and_cd(self) -> None:
+        token = "unit-test-terminal-token-1234567890"
+        config = self.config(TERMINAL_ENABLED=True, TERMINAL_TOKEN=token)
+        tunnel = plugin.R2RemoteTunnel((config,))
+        writer = MemoryWriter()
+        tunnel.writer = writer
+        request_id = "terminal-cd"
+        session_id = "test-session"
+        command = "cd /"
+        signature = hmac.new(
+            token.encode("utf-8"),
+            f"{request_id}\0{session_id}\0{command}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        await tunnel._handle_shell(
+            {
+                "PT": "plugin.ctl",
+                "src": 4567,
+                "cmd": "r2shell.exec",
+                "arg": {
+                    "id": request_id,
+                    "session": session_id,
+                    "command": command,
+                    "auth": signature,
+                },
+            }
+        )
+        events = [frame["tunnel"] for frame in writer.frames()]
+        self.assertEqual(events[-1]["kind"], "shell.done")
+        self.assertEqual(events[-1]["exit_code"], 0)
+        self.assertEqual(events[-1]["cwd"], os.path.realpath("/"))
+        self.assertNotIn(token, json.dumps(writer.frames()))
 
 
 if __name__ == "__main__":

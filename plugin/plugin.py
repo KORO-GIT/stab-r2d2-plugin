@@ -12,13 +12,16 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import hashlib
 import hmac
 import ipaddress
 import json
 import os
+import shlex
 import signal
 import socket
 import struct
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -29,7 +32,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.2.0"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
@@ -219,6 +222,10 @@ class Config:
     remote_max_response_bytes: int
     auto_discover: bool
     discovery_interval: float
+    terminal_enabled: bool
+    terminal_token: str
+    terminal_timeout: float
+    terminal_max_output_bytes: int
 
     @classmethod
     def from_dict(
@@ -252,6 +259,12 @@ class Config:
             ),
             auto_discover=_bool(raw.get("AUTO_DISCOVER"), True),
             discovery_interval=_positive_float(raw.get("DISCOVERY_INTERVAL"), 60.0),
+            terminal_enabled=_bool(raw.get("TERMINAL_ENABLED"), False),
+            terminal_token=str(raw.get("TERMINAL_TOKEN", "")),
+            terminal_timeout=_positive_float(raw.get("TERMINAL_TIMEOUT"), 20.0),
+            terminal_max_output_bytes=_positive_int(
+                raw.get("TERMINAL_MAX_OUTPUT_BYTES"), 256 * 1024
+            ),
         )
 
 
@@ -709,6 +722,17 @@ class R2RemoteTunnel:
         self._websockets: dict[str, tuple[object, int]] = {}
         self._connected_logged = False
         self._logged_request_ports: set[int] = set()
+        self._shell_cwds: dict[str, str] = {}
+        self._shell_requests: set[str] = set()
+
+    @property
+    def shell_config(self) -> Config:
+        return next(iter(self.configs.values()))
+
+    @property
+    def shell_available(self) -> bool:
+        config = self.shell_config
+        return config.terminal_enabled and len(config.terminal_token) >= 24
 
     async def run(self) -> None:
         for proxy in self.proxies.values():
@@ -757,6 +781,7 @@ class R2RemoteTunnel:
                     "tm": {
                         "service": "stabh-browser-tunnel",
                         "ports": sorted(self.configs),
+                        "terminal": self.shell_available,
                     },
                 },
             )
@@ -772,7 +797,13 @@ class R2RemoteTunnel:
             if frame.get("PT") != "plugin.ctl":
                 continue
             command = frame.get("cmd")
-            if command not in {"stabh.http", "stabh.ws.open", "stabh.ws.send", "stabh.ws.close"}:
+            if command not in {
+                "stabh.http",
+                "stabh.ws.open",
+                "stabh.ws.send",
+                "stabh.ws.close",
+                "r2shell.exec",
+            }:
                 continue
             task = asyncio.create_task(self._dispatch(frame))
             self._tasks.add(task)
@@ -788,6 +819,8 @@ class R2RemoteTunnel:
             await self._send_websocket(frame)
         elif command == "stabh.ws.close":
             await self._close_websocket(frame)
+        elif command == "r2shell.exec":
+            await self._handle_shell(frame)
 
     def _request_parts(self, frame: dict) -> tuple[int, str, dict, int]:
         arg = frame.get("arg") if isinstance(frame.get("arg"), dict) else {}
@@ -1036,6 +1069,157 @@ class R2RemoteTunnel:
             {"kind": "error", "id": request_id, "message": message[:160]},
         )
 
+    async def _handle_shell(self, frame: dict) -> None:
+        source, request_id, arg, _ = self._request_parts(frame)
+        if not source or not request_id:
+            return
+        config = self.shell_config
+        if not self.shell_available:
+            await self._tunnel_error(
+                source,
+                request_id,
+                "R2D2 terminal is disabled or TERMINAL_TOKEN is shorter than 24 characters",
+            )
+            return
+        session_id = str(arg.get("session", "default"))[:80]
+        command = str(arg.get("command", ""))
+        signed = f"{request_id}\0{session_id}\0{command}".encode("utf-8")
+        expected_auth = hmac.new(
+            config.terminal_token.encode("utf-8"), signed, hashlib.sha256
+        ).hexdigest()
+        supplied_auth = str(arg.get("auth", ""))
+        if not hmac.compare_digest(supplied_auth, expected_auth):
+            await self._tunnel_error(source, request_id, "terminal authentication failed")
+            return
+        if request_id in self._shell_requests:
+            await self._tunnel_error(source, request_id, "duplicate terminal request")
+            return
+        self._shell_requests.add(request_id)
+        if len(self._shell_requests) > 2048:
+            self._shell_requests = set(list(self._shell_requests)[-1024:])
+        if not command.strip():
+            await self._tunnel_error(source, request_id, "terminal command is empty")
+            return
+        if len(command.encode("utf-8")) > 8192 or "\0" in command:
+            await self._tunnel_error(source, request_id, "terminal command is too long")
+            return
+
+        cwd = self._shell_cwds.get(session_id, "/")
+        changed, change_output = self._change_directory(command, cwd)
+        if changed is not None:
+            self._shell_cwds[session_id] = changed
+            await self._tunnel_event(
+                source,
+                {
+                    "kind": "shell.output",
+                    "id": request_id,
+                    "data": base64.b64encode(change_output).decode("ascii"),
+                },
+            )
+            await self._tunnel_event(
+                source,
+                {
+                    "kind": "shell.done",
+                    "id": request_id,
+                    "exit_code": 0 if not change_output else 1,
+                    "cwd": changed if not change_output else cwd,
+                    "timed_out": False,
+                    "truncated": False,
+                },
+            )
+            return
+
+        timeout = min(max(float(config.terminal_timeout), 1.0), 60.0)
+        maximum = min(max(int(config.terminal_max_output_bytes), 4096), 512 * 1024)
+        await self._tunnel_event(
+            source,
+            {"kind": "shell.start", "id": request_id, "cwd": cwd},
+        )
+        log("INFO", "authenticated R2D2 terminal command received")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-lc",
+                command,
+                cwd=cwd,
+                stdin=subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            await self._tunnel_error(
+                source, request_id, f"cannot start shell: {type(exc).__name__}"
+            )
+            return
+        assert process.stdout is not None
+        sent = 0
+        truncated = False
+
+        async def forward_output() -> int:
+            nonlocal sent, truncated
+            while True:
+                chunk = await process.stdout.read(8 * 1024)
+                if not chunk:
+                    break
+                remaining = maximum - sent
+                if remaining <= 0:
+                    truncated = True
+                    continue
+                payload = chunk[:remaining]
+                sent += len(payload)
+                if len(payload) < len(chunk):
+                    truncated = True
+                await self._tunnel_event(
+                    source,
+                    {
+                        "kind": "shell.output",
+                        "id": request_id,
+                        "data": base64.b64encode(payload).decode("ascii"),
+                    },
+                )
+            return await process.wait()
+
+        timed_out = False
+        try:
+            exit_code = await asyncio.wait_for(forward_output(), timeout=timeout)
+        except asyncio.TimeoutError:
+            timed_out = True
+            truncated = True
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            exit_code = await process.wait()
+
+        await self._tunnel_event(
+            source,
+            {
+                "kind": "shell.done",
+                "id": request_id,
+                "exit_code": int(exit_code),
+                "cwd": cwd,
+                "timed_out": timed_out,
+                "truncated": truncated,
+            },
+        )
+
+    @staticmethod
+    def _change_directory(command: str, cwd: str) -> tuple[str | None, bytes]:
+        try:
+            parts = shlex.split(command, posix=True)
+        except ValueError:
+            return None, b""
+        if not parts or parts[0] != "cd" or len(parts) > 2:
+            return None, b""
+        target = os.path.expanduser(parts[1] if len(parts) == 2 else "~")
+        if not os.path.isabs(target):
+            target = os.path.join(cwd, target)
+        target = os.path.realpath(target)
+        if not os.path.isdir(target):
+            return cwd, f"cd: no such directory: {target}\n".encode("utf-8")
+        return target, b""
+
 
 def create_app(config: Config) -> web.Application:
     proxy = StabXProxy(config)
@@ -1056,6 +1240,11 @@ def create_app(config: Config) -> web.Application:
 
 async def run(configs: tuple[Config, ...]) -> None:
     log("INFO", f"StabX R2D2 plugin version {PLUGIN_VERSION}")
+    shell_config = configs[0]
+    if shell_config.terminal_enabled and len(shell_config.terminal_token) < 24:
+        log("ERROR", "terminal requested but TERMINAL_TOKEN must contain at least 24 characters")
+    elif shell_config.terminal_enabled:
+        log("WARNING", "authenticated R2D2 command terminal is enabled")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in ("SIGTERM", "SIGINT"):

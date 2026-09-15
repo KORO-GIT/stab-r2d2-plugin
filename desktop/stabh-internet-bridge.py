@@ -7,6 +7,8 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hashlib
+import hmac
 import json
 import uuid
 import webbrowser
@@ -26,6 +28,110 @@ HOP_BY_HOP = {
     "transfer-encoding",
     "upgrade",
 }
+
+TERMINAL_HTML = r"""<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>R2D2 Terminal</title>
+<style>
+  :root{color-scheme:dark;--bg:#0b0f14;--panel:#121923;--line:#253143;--green:#5ee98a;--text:#dbe6f3;--muted:#8695a8;--red:#ff6b7d}
+  *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,sans-serif}
+  main{max-width:1100px;margin:auto;padding:24px}h1{font-size:22px;margin:0 0 6px}.hint{color:var(--muted);margin:0 0 18px}
+  .bar,.presets{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}input,textarea,button{border:1px solid var(--line);border-radius:8px;background:var(--panel);color:var(--text)}
+  input{padding:10px 12px;min-width:260px;flex:1}textarea{width:100%;min-height:92px;padding:12px;font:14px/1.45 Consolas,monospace;resize:vertical}
+  button{padding:10px 14px;cursor:pointer}button.primary{background:#167a43;border-color:#239759}button:disabled{opacity:.55;cursor:wait}
+  #status{margin-left:auto;color:var(--muted);align-self:center}#output{white-space:pre-wrap;word-break:break-word;background:#05080c;border:1px solid var(--line);border-radius:8px;min-height:420px;padding:14px;margin-top:12px;font:14px/1.4 Consolas,monospace;color:#cfe8d6}
+  .error{color:var(--red)}.ok{color:var(--green)}
+</style>
+<main>
+  <h1>Терминал Raspberry Pi R2D2</h1>
+  <p class="hint">Команды идут только через активное соединение R2D2. Токен хранится лишь в этой вкладке и не записывается на ПК.</p>
+  <div class="bar"><input id="token" type="password" autocomplete="off" placeholder="TERMINAL_TOKEN из настроек плагина"><span id="status">проверка соединения…</span></div>
+  <div class="presets">
+    <button data-preset="hdmi">HDMI / CSI</button>
+    <button data-preset="system">Система</button>
+    <button data-preset="network">Сеть</button>
+    <button data-preset="services">Видеосервисы</button>
+  </div>
+  <textarea id="command" spellcheck="false">pwd
+id
+uname -a</textarea>
+  <div class="bar"><button id="run" class="primary">Выполнить</button><button id="clear">Очистить вывод</button></div>
+  <div id="output">R2D2 terminal ready.
+</div>
+</main>
+<script>
+const presets = {
+  hdmi: `echo '===== ID / KERNEL ====='
+id
+uname -a
+echo '===== VIDEO NODES ====='
+ls -la /dev/video* /dev/media* /dev/v4l-subdev* 2>&1
+echo '===== V4L2 DEVICES ====='
+if command -v v4l2-ctl >/dev/null 2>&1; then v4l2-ctl --list-devices 2>&1; else echo 'v4l2-ctl is not installed'; fi
+echo '===== HDMI DV TIMINGS ====='
+for d in /dev/video* /dev/v4l-subdev*; do
+  [ -e "$d" ] || continue
+  echo "----- $d -----"
+  v4l2-ctl -d "$d" --query-dv-timings 2>&1 || true
+done
+echo '===== MEDIA GRAPH ====='
+if command -v media-ctl >/dev/null 2>&1; then media-ctl -p 2>&1; else echo 'media-ctl is not installed'; fi
+echo '===== KERNEL VIDEO LOG ====='
+(dmesg 2>/dev/null || journalctl -k --no-pager -n 300 2>/dev/null) | grep -Ei 'tc358743|unicam|csi|hdmi|video|i2c' | tail -n 180`,
+  system: `echo '===== SYSTEM ====='
+id
+uname -a
+cat /etc/os-release 2>/dev/null
+echo '===== UPTIME / STORAGE / MEMORY ====='
+uptime
+df -h
+free -h 2>/dev/null || true
+echo '===== TEMPERATURE ====='
+vcgencmd measure_temp 2>/dev/null || cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null`,
+  network: `echo '===== ADDRESSES ====='
+ip -br address 2>&1
+echo '===== ROUTES ====='
+ip route 2>&1
+echo '===== NEIGHBOURS ====='
+ip neigh 2>&1
+echo '===== LISTENING PORTS ====='
+ss -lntup 2>&1`,
+  services: `echo '===== VIDEO PROCESSES ====='
+ps auxww | grep -Ei 'r2d2|camera|video|ffmpeg|gst|libcamera|rpicam' | grep -v grep
+echo '===== RUNNING SERVICES ====='
+systemctl --type=service --state=running --no-pager 2>&1 | grep -Ei 'r2|camera|video|ffmpeg|gst' || true
+echo '===== FAILED SERVICES ====='
+systemctl --failed --no-pager 2>&1 || true`
+};
+const token = document.querySelector('#token'), command = document.querySelector('#command');
+const output = document.querySelector('#output'), run = document.querySelector('#run'), status = document.querySelector('#status');
+const session = sessionStorage.r2shellSession || (sessionStorage.r2shellSession = crypto.randomUUID());
+let cwd = sessionStorage.r2shellCwd || '/';
+document.querySelectorAll('[data-preset]').forEach(b => b.onclick = () => command.value = presets[b.dataset.preset]);
+document.querySelector('#clear').onclick = () => output.textContent = '';
+async function refreshStatus(){
+  try{const r=await fetch('/api/status');const j=await r.json();status.textContent=j.ok?`R2D2 подключён · ${j.vpn||''}`:'R2D2 не подключён';status.className=j.ok?'ok':'error'}
+  catch(e){status.textContent='локальный мост недоступен';status.className='error'}
+}
+run.onclick = async () => {
+  if(!token.value){output.textContent += '\nОШИБКА: введите TERMINAL_TOKEN.\n';token.focus();return}
+  if(!command.value.trim())return;
+  run.disabled=true; output.textContent += `\n${cwd} $ ${command.value}\n`;
+  try{
+    const r=await fetch('/api/exec',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token.value,command:command.value,session,cwd})});
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.error||`HTTP ${r.status}`);
+    if(j.output)output.textContent+=j.output;
+    if(j.cwd){cwd=j.cwd;sessionStorage.r2shellCwd=cwd}
+    output.textContent+=`\n[код ${j.exit_code}${j.timed_out?', таймаут':''}${j.truncated?', вывод обрезан':''}]\n`;
+  }catch(e){output.textContent+=`\nОШИБКА: ${e.message}\n`}finally{run.disabled=false;output.scrollTop=output.scrollHeight}
+};
+command.addEventListener('keydown',e=>{if(e.ctrlKey&&e.key==='Enter')run.click()});
+refreshStatus(); setInterval(refreshStatus,5000);
+</script>
+</html>"""
 
 
 class R2D2Transport:
@@ -90,7 +196,7 @@ class R2D2Transport:
             "arg": argument,
         }
         destinations = [destination]
-        if not self.routing_locked and command in {"stabh.http", "stabh.ws.open"}:
+        if not self.routing_locked and command in {"stabh.http", "stabh.ws.open", "r2shell.exec"}:
             # Old R2D2 Internet builds may rewrite the source announced by a
             # TGZ process to one of the adjacent local service addresses.
             destinations = list(dict.fromkeys([destination, 65606, 65607, 65608, 65609]))
@@ -344,6 +450,96 @@ class LocalProxy:
         return output
 
 
+class TerminalProxy:
+    def __init__(self, transport: R2D2Transport):
+        self.transport = transport
+
+    async def index(self, _: web.Request) -> web.Response:
+        return web.Response(text=TERMINAL_HTML, content_type="text/html")
+
+    async def status(self, _: web.Request) -> web.Response:
+        ready = self.transport.ready.is_set() and self.transport.session_ready.is_set()
+        return web.json_response(
+            {
+                "ok": ready,
+                "r2d2": self.transport.url,
+                "plugin_source": self.transport.plugin_source,
+                "vpn": self.transport.vpn,
+            },
+            status=200 if ready else 503,
+        )
+
+    async def execute(self, request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON request"}, status=400)
+        token = str(payload.get("token", ""))
+        command = str(payload.get("command", ""))
+        session_id = str(payload.get("session", "default"))[:80]
+        if not token:
+            return web.json_response({"error": "TERMINAL_TOKEN is required"}, status=401)
+        if not command.strip():
+            return web.json_response({"error": "command is empty"}, status=400)
+        if len(command.encode("utf-8")) > 8192:
+            return web.json_response({"error": "command exceeds 8 KiB"}, status=413)
+
+        request_id = uuid.uuid4().hex
+        signature = hmac.new(
+            token.encode("utf-8"),
+            f"{request_id}\0{session_id}\0{command}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        queue = self.transport.register(request_id)
+        chunks: list[bytes] = []
+        result = {
+            "exit_code": -1,
+            "cwd": str(payload.get("cwd", "/")),
+            "timed_out": False,
+            "truncated": False,
+        }
+        try:
+            await self.transport.command(
+                "r2shell.exec",
+                {
+                    "id": request_id,
+                    "auth": signature,
+                    "command": command,
+                    "session": session_id,
+                },
+            )
+            while True:
+                event = await asyncio.wait_for(queue.get(), 75)
+                kind = event.get("kind")
+                if kind == "error":
+                    return web.json_response(
+                        {"error": str(event.get("message", "terminal error"))},
+                        status=502,
+                    )
+                if kind == "shell.output":
+                    try:
+                        chunks.append(base64.b64decode(str(event.get("data", "")), validate=True))
+                    except ValueError:
+                        return web.json_response({"error": "invalid terminal output"}, status=502)
+                if kind == "shell.done":
+                    result.update(
+                        exit_code=int(event.get("exit_code", -1)),
+                        cwd=str(event.get("cwd", result["cwd"])),
+                        timed_out=bool(event.get("timed_out")),
+                        truncated=bool(event.get("truncated")),
+                    )
+                    break
+            result["output"] = b"".join(chunks).decode("utf-8", errors="replace")
+            return web.json_response(result)
+        except (asyncio.TimeoutError, ConnectionError) as exc:
+            return web.json_response(
+                {"error": str(exc) or "R2D2 terminal timeout"},
+                status=504,
+            )
+        finally:
+            self.transport.unregister(request_id)
+
+
 async def run(arguments: argparse.Namespace) -> None:
     transport = R2D2Transport(arguments.r2d2)
     await transport.start()
@@ -362,11 +558,24 @@ async def run(arguments: argparse.Namespace) -> None:
                 flush=True,
             )
 
+        terminal = TerminalProxy(transport)
+        terminal_app = web.Application(client_max_size=16 * 1024)
+        terminal_app.router.add_get("/", terminal.index)
+        terminal_app.router.add_get("/api/status", terminal.status)
+        terminal_app.router.add_post("/api/exec", terminal.execute)
+        terminal_runner = web.AppRunner(terminal_app, access_log=None)
+        await terminal_runner.setup()
+        await web.TCPSite(terminal_runner, "127.0.0.1", 18081).start()
+        runners.append(terminal_runner)
+        print("INFO: R2D2 terminal http://127.0.0.1:18081/", flush=True)
+
         if not arguments.no_browser:
             async def open_when_ready() -> None:
                 await transport.ready.wait()
                 webbrowser.open("http://127.0.0.1:18080/")
                 webbrowser.open("http://127.0.0.1:15050/")
+                if arguments.open_terminal:
+                    webbrowser.open("http://127.0.0.1:18081/")
 
             asyncio.create_task(open_when_ready())
         print("INFO: keep this window open; press Ctrl+C to stop", flush=True)
@@ -381,6 +590,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="StabX browser tunnel over R2D2")
     parser.add_argument("--r2d2", default="ws://127.0.0.1:54546/")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--open-terminal", action="store_true")
     arguments = parser.parse_args()
     try:
         asyncio.run(run(arguments))

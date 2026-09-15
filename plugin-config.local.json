@@ -3,7 +3,7 @@
     "koropwnz/stab-r2d2-plugin": {
       "enabled": true,
       "type": "docker",
-      "ver": "0.1.4",
+      "ver": "0.2.0",
       "registry": "registry-1.docker.io",
       "log_persist": false,
       "config": {
@@ -16,6 +16,10 @@
         "SECONDARY_LISTEN_PORT": 15050,
         "REMOTE_TUNNEL_ENABLED": true,
         "REMOTE_MAX_RESPONSE_BYTES": 4194304,
+        "TERMINAL_ENABLED": false,
+        "TERMINAL_TOKEN": "",
+        "TERMINAL_TIMEOUT": 20,
+        "TERMINAL_MAX_OUTPUT_BYTES": 262144,
         "PROXY_USERNAME": "",
         "PROXY_PASSWORD": "",
         "CONNECT_TIMEOUT": 5.0,

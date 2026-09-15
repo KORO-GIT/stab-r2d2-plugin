@@ -1,8 +1,8 @@
 {
   "plugin": {
     "key": "koropwnz/stab-r2d2-plugin",
-    "name": "StabX: віддалений веб-доступ",
-    "description": "Відкриває сервіси Raspberry Pi Zero модуля StabX через точку доступу та мережевий канал R2D2. На комп'ютері оператора порти 18080 і 15050 вузла R2D2 перенаправляються відповідно до pizero2:8080 і pizero2:5050.",
+    "name": "StabX та термінал R2D2",
+    "description": "Відкриває сервіси Raspberry Pi Zero модуля StabX через мережевий канал R2D2 та надає захищену токеном командну консоль для діагностики Raspberry Pi R2D2. Локальні адреси оператора: 18080, 15050 і 18081.",
     "type": "docker",
     "icon": "Router",
     "helpLink": "",
@@ -12,10 +12,10 @@
   },
   "versions": [
     {
-      "version": "0.1.4",
-      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.1.4/stabh-r2d2-plugin-0.1.4.tgz",
-      "description": "Два HTTP/POST reverse proxy для портів StabX 8080 і 5050, віддалений тунель R2D2, WebSocket, перевірка доступності та необов'язкова Basic-авторизація.",
-      "whatsNew": "Сумісність зі старим Інтернет-реле R2D2: відповіді тунелю повертаються через штатний наземний канал 1000, навіть якщо реле не додало поле src до команди. Збережено діагностику Wi-Fi та автопошук StabX.",
+      "version": "0.2.0",
+      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.2.0/stabh-r2d2-plugin-0.2.0.tgz",
+      "description": "Два веб-проксі StabX і захищена токеном командна консоль Raspberry Pi R2D2 через штатний Інтернет-канал.",
+      "whatsNew": "Додано термінал R2D2 на локальній адресі 127.0.0.1:18081, готові діагностики HDMI/CSI, системи, мережі та відеосервісів. Команди підписуються HMAC-SHA256; секретний токен не передається в журналі R2D2.",
       "configSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -77,6 +77,30 @@
             "maximum": 16777216,
             "default": 4194304
           },
+          "TERMINAL_ENABLED": {
+            "type": "boolean",
+            "title": "Увімкнути захищений термінал R2D2",
+            "default": false
+          },
+          "TERMINAL_TOKEN": {
+            "type": "string",
+            "title": "Секретний токен термінала",
+            "default": ""
+          },
+          "TERMINAL_TIMEOUT": {
+            "type": "number",
+            "title": "Таймаут команди термінала, секунд",
+            "minimum": 1,
+            "maximum": 60,
+            "default": 20
+          },
+          "TERMINAL_MAX_OUTPUT_BYTES": {
+            "type": "integer",
+            "title": "Ліміт виводу однієї команди, байт",
+            "minimum": 4096,
+            "maximum": 524288,
+            "default": 262144
+          },
           "PROXY_USERNAME": {
             "type": "string",
             "title": "Логін проксі",
@@ -118,6 +142,10 @@
           "SECONDARY_LISTEN_PORT",
           "REMOTE_TUNNEL_ENABLED",
           "REMOTE_MAX_RESPONSE_BYTES",
+          "TERMINAL_ENABLED",
+          "TERMINAL_TOKEN",
+          "TERMINAL_TIMEOUT",
+          "TERMINAL_MAX_OUTPUT_BYTES",
           "PROXY_USERNAME",
           "PROXY_PASSWORD",
           "CONNECT_TIMEOUT",
@@ -142,6 +170,19 @@
         "REMOTE_MAX_RESPONSE_BYTES": {
           "ui:advanced": true,
           "ui:help": "Захисний ліміт для сторінок і файлів. Відеопотоки через цей канал блокуються."
+        },
+        "TERMINAL_ENABLED": {
+          "ui:help": "Термінал працює тільки через авторизований канал R2D2 і додатково вимагає секретний токен. Увімкніть лише на час діагностики."
+        },
+        "TERMINAL_TOKEN": {
+          "ui:widget": "password",
+          "ui:help": "Не менше 24 символів. Токен не надсилається у командах: використовується підпис HMAC-SHA256."
+        },
+        "TERMINAL_TIMEOUT": {
+          "ui:advanced": true
+        },
+        "TERMINAL_MAX_OUTPUT_BYTES": {
+          "ui:advanced": true
         },
         "PROXY_USERNAME": {
           "ui:help": "Залиште порожнім лише в ізольованій мережі. Якщо логін задано, браузер запросить логін і пароль."
@@ -168,6 +209,10 @@
         "SECONDARY_LISTEN_PORT": 15050,
         "REMOTE_TUNNEL_ENABLED": true,
         "REMOTE_MAX_RESPONSE_BYTES": 4194304,
+        "TERMINAL_ENABLED": false,
+        "TERMINAL_TOKEN": "",
+        "TERMINAL_TIMEOUT": 20,
+        "TERMINAL_MAX_OUTPUT_BYTES": 262144,
         "PROXY_USERNAME": "",
         "PROXY_PASSWORD": "",
         "CONNECT_TIMEOUT": 5.0,
