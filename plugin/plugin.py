@@ -29,6 +29,7 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
+PLUGIN_VERSION = "0.1.3"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
@@ -190,8 +191,13 @@ def _local_ipv4_networks() -> tuple[tuple[ipaddress.IPv4Network, str], ...]:
             continue
         finally:
             probe.close()
-        if not _private_ipv4(address) or network.prefixlen < 24:
+        if not _private_ipv4(address):
             continue
+        # A broad /16 or /20 is too large for an active scan.  Scan the /24
+        # around the R2D2 interface instead; this is where an AP client is
+        # normally leased an address.
+        if network.prefixlen < 24:
+            network = ipaddress.ip_network(f"{address}/24", strict=False)
         output.append((network, address))
     return tuple(output[:4])
 
@@ -377,12 +383,22 @@ class StabXProxy:
             return False
 
     async def _discover_target(self) -> Target | None:
-        for address in _neighbor_candidates():
+        neighbours = _neighbor_candidates()
+        networks = _local_ipv4_networks()
+        network_text = ",".join(f"{network}[r2={own}]" for network, own in networks) or "none"
+        neighbour_text = ",".join(neighbours) or "none"
+        log(
+            "INFO",
+            f"discovery port {self.config.target_port}: networks={network_text}; "
+            f"DHCP/ARP peers={neighbour_text}",
+        )
+
+        for address in neighbours:
             if await self._probe_address(address, timeout=0.35):
                 return Target(self.config.target_hosts[0], address, self.config.target_port)
 
         addresses: list[str] = []
-        for network, own_address in _local_ipv4_networks():
+        for network, own_address in networks:
             for address in network.hosts():
                 value = str(address)
                 if value != own_address:
@@ -407,6 +423,7 @@ class StabXProxy:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+        log("WARNING", f"discovery port {self.config.target_port}: no listening StabX service found")
         return None
 
     def invalidate_target(self) -> None:
@@ -691,6 +708,7 @@ class R2RemoteTunnel:
         self._tasks: set[asyncio.Task] = set()
         self._websockets: dict[str, tuple[object, int]] = {}
         self._connected_logged = False
+        self._logged_request_ports: set[int] = set()
 
     async def run(self) -> None:
         for proxy in self.proxies.values():
@@ -803,6 +821,9 @@ class R2RemoteTunnel:
         source, request_id, arg, target_port = self._request_parts(frame)
         if not source or not request_id:
             return
+        if target_port not in self._logged_request_ports:
+            log("INFO", f"Internet browser request received for StabX port {target_port}")
+            self._logged_request_ports.add(target_port)
         config = self.configs.get(target_port)
         proxy = self.proxies.get(target_port)
         if config is None or proxy is None:
@@ -1030,6 +1051,7 @@ def create_app(config: Config) -> web.Application:
 
 
 async def run(configs: tuple[Config, ...]) -> None:
+    log("INFO", f"StabX R2D2 plugin version {PLUGIN_VERSION}")
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for name in ("SIGTERM", "SIGINT"):
