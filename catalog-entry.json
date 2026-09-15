@@ -1,0 +1,160 @@
+{
+  "plugin": {
+    "key": "koropwnz/stab-r2d2-plugin",
+    "name": "StabX: віддалений веб-доступ",
+    "description": "Відкриває сервіси Raspberry Pi Zero модуля StabX через точку доступу та мережевий канал R2D2. На комп'ютері оператора порти 18080 і 15050 вузла R2D2 перенаправляються відповідно до pizero2:8080 і pizero2:5050.",
+    "type": "docker",
+    "icon": "Router",
+    "helpLink": "",
+    "registry": "registry-1.docker.io",
+    "status": "test",
+    "published": true
+  },
+  "versions": [
+    {
+      "version": "0.1.1",
+      "url": "",
+      "description": "Два HTTP/POST reverse proxy для портів StabX 8080 і 5050, віддалений тунель R2D2, WebSocket, перевірка доступності та необов'язкова Basic-авторизація.",
+      "whatsNew": "Додано порт StabX 5050 та віддалений доступ через Інтернет-канал R2D2. Реєстр змінено на registry-1.docker.io, щоб публічний образ завантажувався без пошкодженого auth.json для docker.io.",
+      "configSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "TARGET_HOSTS": {
+            "type": "string",
+            "title": "Адреси StabX",
+            "default": "pizero2,pizero2.local"
+          },
+          "TARGET_PORT": {
+            "type": "integer",
+            "title": "Порт StabX",
+            "minimum": 1,
+            "maximum": 65535,
+            "default": 8080
+          },
+          "LISTEN_PORT": {
+            "type": "integer",
+            "title": "Порт на R2D2",
+            "minimum": 1024,
+            "maximum": 65535,
+            "default": 18080
+          },
+          "SECONDARY_TARGET_PORT": {
+            "type": "integer",
+            "title": "Другий порт StabX",
+            "minimum": 1,
+            "maximum": 65535,
+            "default": 5050
+          },
+          "SECONDARY_LISTEN_PORT": {
+            "type": "integer",
+            "title": "Другий порт на R2D2",
+            "minimum": 1024,
+            "maximum": 65535,
+            "default": 15050
+          },
+          "REMOTE_TUNNEL_ENABLED": {
+            "type": "boolean",
+            "title": "Доступ через Інтернет-канал R2D2",
+            "default": true
+          },
+          "REMOTE_MAX_RESPONSE_BYTES": {
+            "type": "integer",
+            "title": "Ліміт однієї відповіді через Інтернет, байт",
+            "minimum": 65536,
+            "maximum": 16777216,
+            "default": 4194304
+          },
+          "PROXY_USERNAME": {
+            "type": "string",
+            "title": "Логін проксі",
+            "default": ""
+          },
+          "PROXY_PASSWORD": {
+            "type": "string",
+            "title": "Пароль проксі",
+            "default": ""
+          },
+          "CONNECT_TIMEOUT": {
+            "type": "number",
+            "title": "Таймаут з'єднання, секунд",
+            "minimum": 0.5,
+            "maximum": 30,
+            "default": 5.0
+          },
+          "REWRITE_ABSOLUTE_URLS": {
+            "type": "boolean",
+            "title": "Переписувати абсолютні посилання StabX",
+            "default": true
+          }
+        },
+        "required": [
+          "TARGET_HOSTS",
+          "TARGET_PORT",
+          "LISTEN_PORT",
+          "SECONDARY_TARGET_PORT",
+          "SECONDARY_LISTEN_PORT"
+        ]
+      },
+      "uiSchema": {
+        "ui:order": [
+          "TARGET_HOSTS",
+          "TARGET_PORT",
+          "LISTEN_PORT",
+          "SECONDARY_TARGET_PORT",
+          "SECONDARY_LISTEN_PORT",
+          "REMOTE_TUNNEL_ENABLED",
+          "REMOTE_MAX_RESPONSE_BYTES",
+          "PROXY_USERNAME",
+          "PROXY_PASSWORD",
+          "CONNECT_TIMEOUT",
+          "REWRITE_ABSOLUTE_URLS"
+        ],
+        "TARGET_HOSTS": {
+          "ui:help": "Плагін перевіряє адреси зліва направо. Якщо імена не визначаються, вкажіть IP Raspberry Pi Zero."
+        },
+        "LISTEN_PORT": {
+          "ui:help": "Вебінтерфейс буде доступний на цьому TCP-порту IP-адреси R2D2."
+        },
+        "SECONDARY_LISTEN_PORT": {
+          "ui:help": "Сервіс StabX на порту 5050 буде доступний на цьому TCP-порту IP-адреси R2D2."
+        },
+        "REMOTE_TUNNEL_ENABLED": {
+          "ui:help": "Передає браузерні запити через plugin.ctl, коли наземна станція підключена до борту через Інтернет."
+        },
+        "REMOTE_MAX_RESPONSE_BYTES": {
+          "ui:advanced": true,
+          "ui:help": "Захисний ліміт для сторінок і файлів. Відеопотоки через цей канал блокуються."
+        },
+        "PROXY_USERNAME": {
+          "ui:help": "Залиште порожнім лише в ізольованій мережі. Якщо логін задано, браузер запросить логін і пароль."
+        },
+        "PROXY_PASSWORD": {
+          "ui:widget": "password"
+        },
+        "CONNECT_TIMEOUT": {
+          "ui:advanced": true
+        },
+        "REWRITE_ABSOLUTE_URLS": {
+          "ui:advanced": true
+        }
+      },
+      "defaultConfig": {
+        "TARGET_HOSTS": "pizero2,pizero2.local",
+        "TARGET_PORT": 8080,
+        "LISTEN_PORT": 18080,
+        "SECONDARY_TARGET_PORT": 5050,
+        "SECONDARY_LISTEN_PORT": 15050,
+        "REMOTE_TUNNEL_ENABLED": true,
+        "REMOTE_MAX_RESPONSE_BYTES": 4194304,
+        "PROXY_USERNAME": "",
+        "PROXY_PASSWORD": "",
+        "CONNECT_TIMEOUT": 5.0,
+        "REWRITE_ABSOLUTE_URLS": true
+      },
+      "presets": [],
+      "published": true,
+      "deprecated": false
+    }
+  ]
+}

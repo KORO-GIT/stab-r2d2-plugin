@@ -1,0 +1,24 @@
+{
+  "plugins": {
+    "koropwnz/stab-r2d2-plugin": {
+      "enabled": true,
+      "type": "docker",
+      "ver": "0.1.1",
+      "registry": "registry-1.docker.io",
+      "log_persist": false,
+      "config": {
+        "TARGET_HOSTS": "pizero2,pizero2.local",
+        "TARGET_PORT": 8080,
+        "LISTEN_PORT": 18080,
+        "SECONDARY_TARGET_PORT": 5050,
+        "SECONDARY_LISTEN_PORT": 15050,
+        "REMOTE_TUNNEL_ENABLED": true,
+        "REMOTE_MAX_RESPONSE_BYTES": 4194304,
+        "PROXY_USERNAME": "",
+        "PROXY_PASSWORD": "",
+        "CONNECT_TIMEOUT": 5.0,
+        "REWRITE_ABSOLUTE_URLS": true
+      }
+    }
+  }
+}
