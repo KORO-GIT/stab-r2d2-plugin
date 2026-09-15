@@ -136,6 +136,7 @@
       "uiSchema": {
         "ui:order": [
           "TARGET_HOSTS",
+          "AUTO_DISCOVER",
           "TARGET_PORT",
           "LISTEN_PORT",
           "SECONDARY_TARGET_PORT",
