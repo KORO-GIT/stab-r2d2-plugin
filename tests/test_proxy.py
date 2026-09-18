@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -286,6 +287,31 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if event["kind"] == "http.body" and event["data"]
         ).decode("utf-8")
         self.assertIn("http://127.0.0.1:18080/next", body)
+
+    async def test_r2d2_ack_releases_waiting_event(self) -> None:
+        tunnel = plugin.R2RemoteTunnel((self.config(),))
+        tunnel._ack_enabled = True
+        writer = MemoryWriter()
+        tunnel.writer = writer
+
+        task = asyncio.create_task(
+            tunnel._tunnel_event(
+                4567,
+                {"kind": "shell.done", "id": "ack-test", "exit_code": 0},
+            )
+        )
+        await asyncio.sleep(0)
+        frame = writer.frames()[0]
+        event = frame["tm"]["tunnel"]
+        tunnel._handle_ack(
+            {
+                "PT": "plugin.ctl",
+                "cmd": "stabh.ack",
+                "arg": {"id": event["id"], "seq": event["seq"]},
+            }
+        )
+        await asyncio.wait_for(task, 1)
+        self.assertEqual(frame["dst"], plugin.R2_GROUND)
 
     async def test_terminal_is_disabled_by_default(self) -> None:
         config = self.config()

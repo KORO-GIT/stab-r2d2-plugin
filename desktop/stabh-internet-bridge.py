@@ -272,6 +272,16 @@ class R2D2Transport:
                             queue = self.pending.get(str(event.get("id", "")))
                             if queue is not None:
                                 await queue.put(event)
+                            request_id = str(event.get("id", ""))[:80]
+                            try:
+                                sequence = int(event.get("seq", 0))
+                            except (TypeError, ValueError):
+                                sequence = 0
+                            if request_id and sequence > 0:
+                                await self.command(
+                                    "stabh.ack",
+                                    {"id": request_id, "seq": sequence},
+                                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

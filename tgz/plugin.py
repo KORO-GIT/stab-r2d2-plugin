@@ -33,11 +33,12 @@ CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 HDMI_DIAGNOSTICS_PATH = "/__r2_stabh_proxy/hdmi"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.2.4"
+PLUGIN_VERSION = "0.2.5"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
-R2_EVENT_DELAY_SECONDS = 0.25
+R2_ACK_TIMEOUT_SECONDS = 2.0
+R2_ACK_RETRIES = 5
 TUNNEL_CHUNK_BYTES = 24 * 1024
 HOP_BY_HOP = {
     "connection",
@@ -884,6 +885,9 @@ class R2RemoteTunnel:
         self._logged_request_ports: set[int] = set()
         self._shell_cwds: dict[str, str] = {}
         self._shell_requests: set[str] = set()
+        self._ack_enabled = False
+        self._ack_waiters: dict[tuple[str, int], asyncio.Event] = {}
+        self._event_sequences: dict[str, int] = {}
 
     @property
     def shell_config(self) -> Config:
@@ -948,26 +952,34 @@ class R2RemoteTunnel:
             await asyncio.sleep(5)
 
     async def _read_loop(self, reader: asyncio.StreamReader) -> None:
-        while True:
-            length = struct.unpack("<I", await reader.readexactly(4))[0]
-            if length <= 0 or length > R2_MAX_FRAME:
-                raise ValueError(f"invalid R2D2 frame length: {length}")
-            raw = await reader.readexactly(length)
-            frame = json.loads(raw.split(b"\0", 1)[0].decode("utf-8"))
-            if frame.get("PT") != "plugin.ctl":
-                continue
-            command = frame.get("cmd")
-            if command not in {
-                "stabh.http",
-                "stabh.ws.open",
-                "stabh.ws.send",
-                "stabh.ws.close",
-                "r2shell.exec",
-            }:
-                continue
-            task = asyncio.create_task(self._dispatch(frame))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
+        self._ack_enabled = True
+        try:
+            while True:
+                length = struct.unpack("<I", await reader.readexactly(4))[0]
+                if length <= 0 or length > R2_MAX_FRAME:
+                    raise ValueError(f"invalid R2D2 frame length: {length}")
+                raw = await reader.readexactly(length)
+                frame = json.loads(raw.split(b"\0", 1)[0].decode("utf-8"))
+                if frame.get("PT") != "plugin.ctl":
+                    continue
+                command = frame.get("cmd")
+                if command not in {
+                    "stabh.http",
+                    "stabh.ws.open",
+                    "stabh.ws.send",
+                    "stabh.ws.close",
+                    "stabh.ack",
+                    "r2shell.exec",
+                }:
+                    continue
+                task = asyncio.create_task(self._dispatch(frame))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+        finally:
+            self._ack_enabled = False
+            for waiter in self._ack_waiters.values():
+                waiter.set()
+            self._ack_waiters.clear()
 
     async def _dispatch(self, frame: dict) -> None:
         command = frame.get("cmd")
@@ -979,8 +991,21 @@ class R2RemoteTunnel:
             await self._send_websocket(frame)
         elif command == "stabh.ws.close":
             await self._close_websocket(frame)
+        elif command == "stabh.ack":
+            self._handle_ack(frame)
         elif command == "r2shell.exec":
             await self._handle_shell(frame)
+
+    def _handle_ack(self, frame: dict) -> None:
+        arg = frame.get("arg") if isinstance(frame.get("arg"), dict) else {}
+        request_id = str(arg.get("id", ""))[:80]
+        try:
+            sequence = int(arg.get("seq", 0))
+        except (TypeError, ValueError):
+            return
+        waiter = self._ack_waiters.get((request_id, sequence))
+        if waiter is not None:
+            waiter.set()
 
     def _request_parts(self, frame: dict) -> tuple[int, str, dict, int]:
         arg = frame.get("arg") if isinstance(frame.get("arg"), dict) else {}
@@ -1020,20 +1045,40 @@ class R2RemoteTunnel:
         # Endpoint 1000 is the documented ground-station broadcast endpoint;
         # request IDs ensure that only the requesting desktop bridge consumes
         # the response.
-        await self._send(
-            R2_GROUND,
-            {
-                "tunnel": payload,
-                "tm": {
-                    "service": "stabh-browser-tunnel",
-                    "tunnel": payload,
-                },
+        request_id = str(payload.get("id", ""))[:80]
+        sequence = self._event_sequences.get(request_id, 0) + 1
+        self._event_sequences[request_id] = sequence
+        wire_payload = {**payload, "seq": sequence}
+        fields = {
+            "tunnel": wire_payload,
+            "tm": {
+                "service": "stabh-browser-tunnel",
+                "tunnel": wire_payload,
             },
-        )
-        # The board's delivery queue is configured with a 200 ms step.  A
-        # slightly larger gap prevents consecutive head/body/done events from
-        # replacing each other before the relay transmits them.
-        await asyncio.sleep(R2_EVENT_DELAY_SECONDS)
+        }
+        if not self._ack_enabled or not request_id:
+            await self._send(R2_GROUND, fields)
+            return
+
+        waiter = asyncio.Event()
+        key = (request_id, sequence)
+        self._ack_waiters[key] = waiter
+        try:
+            for _ in range(R2_ACK_RETRIES):
+                await self._send(R2_GROUND, fields)
+                try:
+                    await asyncio.wait_for(
+                        waiter.wait(), timeout=R2_ACK_TIMEOUT_SECONDS
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    continue
+            log(
+                "WARNING",
+                f"R2D2 tunnel event not acknowledged: id={request_id} seq={sequence}",
+            )
+        finally:
+            self._ack_waiters.pop(key, None)
 
     async def _handle_http(self, frame: dict) -> None:
         source, request_id, arg, target_port = self._request_parts(frame)
