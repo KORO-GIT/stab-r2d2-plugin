@@ -5,15 +5,15 @@
     "description": "Відкриває сервіси Raspberry Pi Zero модуля StabX через мережевий канал R2D2 та надає захищену токеном командну консоль для діагностики Raspberry Pi R2D2. Локальні адреси оператора: 18080, 15050 і 18081.",
     "type": "docker",
     "icon": "Router",
-    "helpLink": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/tag/v0.2.6",
+    "helpLink": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/tag/v0.2.7",
     "registry": "registry-1.docker.io",
     "status": "test",
     "published": true
   },
   "versions": [
     {
-      "version": "0.2.6",
-      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.2.6/stabh-r2d2-plugin-0.2.6.tgz",
+      "version": "0.2.7",
+      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.2.7/stabh-r2d2-plugin-0.2.7.tgz",
       "description": "Два веб-проксі StabX і захищена токеном командна консоль Raspberry Pi R2D2 через штатний Інтернет-канал.",
       "whatsNew": "Додано підтвердження доставки ACK для кожного фрагмента веб-відповіді та термінала. Наступний фрагмент надсилається лише після підтвердження від наземної станції.",
       "configSchema": {

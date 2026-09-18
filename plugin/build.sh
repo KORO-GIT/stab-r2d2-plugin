@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${1:-koropwnz/stab-r2d2-plugin}"
-VERSION="${2:-0.2.6}"
+VERSION="${2:-0.2.7}"
 
 docker buildx build \
   --platform linux/arm64,linux/amd64 \
