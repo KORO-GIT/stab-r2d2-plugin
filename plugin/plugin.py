@@ -33,10 +33,11 @@ CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 HDMI_DIAGNOSTICS_PATH = "/__r2_stabh_proxy/hdmi"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.2.4"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
+R2_EVENT_DELAY_SECONDS = 0.25
 TUNNEL_CHUNK_BYTES = 24 * 1024
 HOP_BY_HOP = {
     "connection",
@@ -1029,6 +1030,10 @@ class R2RemoteTunnel:
                 },
             },
         )
+        # The board's delivery queue is configured with a 200 ms step.  A
+        # slightly larger gap prevents consecutive head/body/done events from
+        # replacing each other before the relay transmits them.
+        await asyncio.sleep(R2_EVENT_DELAY_SECONDS)
 
     async def _handle_http(self, frame: dict) -> None:
         source, request_id, arg, target_port = self._request_parts(frame)
