@@ -3,7 +3,7 @@
     "koropwnz/stab-r2d2-plugin": {
       "enabled": true,
       "type": "docker",
-      "ver": "0.2.1",
+      "ver": "0.2.2",
       "registry": "registry-1.docker.io",
       "log_persist": false,
       "config": {

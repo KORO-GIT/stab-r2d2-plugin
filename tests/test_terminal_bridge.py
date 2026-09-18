@@ -104,6 +104,22 @@ class TerminalBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("token", argument)
         self.assertEqual(len(argument["auth"]), 64)
 
+    def test_tunnel_event_accepts_r2d2_telemetry_envelope(self) -> None:
+        event = {"kind": "http.head", "id": "test", "status": 200}
+        self.assertEqual(
+            bridge.tunnel_event_from_frame(
+                {
+                    "PT": "plugin.ctl",
+                    "plugin": bridge.PLUGIN_LABEL,
+                    "tm": {
+                        "service": "stabh-browser-tunnel",
+                        "tunnel": event,
+                    },
+                }
+            ),
+            event,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

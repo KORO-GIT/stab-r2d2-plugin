@@ -134,6 +134,18 @@ refreshStatus(); setInterval(refreshStatus,5000);
 </html>"""
 
 
+def tunnel_event_from_frame(frame: dict) -> dict | None:
+    event = frame.get("tunnel")
+    if isinstance(event, dict):
+        return event
+    telemetry = frame.get("tm")
+    if isinstance(telemetry, dict):
+        event = telemetry.get("tunnel")
+        if isinstance(event, dict):
+            return event
+    return None
+
+
 class R2D2Transport:
     def __init__(self, url: str):
         self.url = url
@@ -248,7 +260,7 @@ class R2D2Transport:
                                     f"source {source}",
                                     flush=True,
                                 )
-                        event = frame.get("tunnel")
+                        event = tunnel_event_from_frame(frame)
                         if isinstance(event, dict):
                             if frame.get("src") is not None and not self.routing_locked:
                                 self.plugin_source = int(frame["src"])

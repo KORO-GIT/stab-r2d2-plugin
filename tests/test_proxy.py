@@ -273,7 +273,9 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await proxy.close()
 
-        events = [frame["tunnel"] for frame in writer.frames()]
+        frames = writer.frames()
+        events = [frame["tunnel"] for frame in frames]
+        self.assertEqual(frames[0]["tm"]["tunnel"], events[0])
         self.assertEqual(events[0]["kind"], "http.head")
         self.assertEqual(events[0]["status"], 200)
         self.assertTrue(events[-1]["eof"])
