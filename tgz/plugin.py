@@ -34,12 +34,14 @@ CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 HDMI_DIAGNOSTICS_PATH = "/__r2_stabh_proxy/hdmi"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.2.7"
+PLUGIN_VERSION = "0.2.8"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
 R2_ACK_TIMEOUT_SECONDS = 2.0
 R2_ACK_RETRIES = 5
+R2_ATOMIC_REPEATS = 8
+R2_ATOMIC_INTERVAL_SECONDS = 0.75
 TUNNEL_CHUNK_BYTES = 24 * 1024
 TUNNEL_ATOMIC_BYTES = 72 * 1024
 HOP_BY_HOP = {
@@ -890,6 +892,7 @@ class R2RemoteTunnel:
         self._ack_enabled = False
         self._ack_waiters: dict[tuple[str, int], asyncio.Event] = {}
         self._event_sequences: dict[str, int] = {}
+        self._announce_paused_until = 0.0
 
     @property
     def shell_config(self) -> Config:
@@ -940,6 +943,10 @@ class R2RemoteTunnel:
 
     async def _announce_loop(self) -> None:
         while True:
+            remaining = self._announce_paused_until - time.monotonic()
+            if remaining > 0:
+                await asyncio.sleep(min(remaining, 0.5))
+                continue
             await self._send(
                 R2_GROUND,
                 {
@@ -1062,8 +1069,37 @@ class R2RemoteTunnel:
         # complete response therefore has to be useful on its own: waiting for
         # an acknowledgement would only keep the plugin task open after the
         # desktop has already received the final result.
-        if wire_payload.get("kind") in {"http.response", "shell.result"}:
-            await self._send(R2_GROUND, fields)
+        if wire_payload.get("kind") in {"http.response", "shell.result", "error"}:
+            # R2D2 forwards plugin telemetry as a sampled latest-value state,
+            # not as a lossless queue.  Keep the complete result visible for
+            # several sampling intervals and prevent the periodic announce
+            # from replacing it in between.  ACK still lets a responsive
+            # desktop stop the repetition immediately.
+            self._announce_paused_until = max(
+                self._announce_paused_until,
+                time.monotonic()
+                + R2_ATOMIC_REPEATS * R2_ATOMIC_INTERVAL_SECONDS
+                + 1.0,
+            )
+            waiter = asyncio.Event()
+            key = (request_id, sequence)
+            if request_id:
+                self._ack_waiters[key] = waiter
+            try:
+                for _ in range(R2_ATOMIC_REPEATS):
+                    await self._send(R2_GROUND, fields)
+                    if request_id:
+                        try:
+                            await asyncio.wait_for(
+                                waiter.wait(), timeout=R2_ATOMIC_INTERVAL_SECONDS
+                            )
+                            break
+                        except asyncio.TimeoutError:
+                            continue
+                    await asyncio.sleep(R2_ATOMIC_INTERVAL_SECONDS)
+            finally:
+                if request_id:
+                    self._ack_waiters.pop(key, None)
             return
         if not self._ack_enabled or not request_id:
             await self._send(R2_GROUND, fields)

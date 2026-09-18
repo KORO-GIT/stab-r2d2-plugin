@@ -8,6 +8,7 @@ import json
 import os
 import struct
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -256,21 +257,24 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         proxy = tunnel.proxies[self.upstream_port]
         await proxy.start()
         try:
-            await tunnel._handle_http(
-                {
-                    "PT": "plugin.ctl",
-                    "src": 4567,
-                    "cmd": "stabh.http",
-                    "arg": {
-                        "id": "remote-test",
-                        "port": self.upstream_port,
-                        "method": "GET",
-                        "path": "/",
-                        "headers": {},
-                        "body": "",
+            with mock.patch.object(plugin, "R2_ATOMIC_REPEATS", 3), mock.patch.object(
+                plugin, "R2_ATOMIC_INTERVAL_SECONDS", 0
+            ):
+                await tunnel._handle_http(
+                    {
+                        "PT": "plugin.ctl",
+                        "src": 4567,
+                        "cmd": "stabh.http",
+                        "arg": {
+                            "id": "remote-test",
+                            "port": self.upstream_port,
+                            "method": "GET",
+                            "path": "/",
+                            "headers": {},
+                            "body": "",
+                        },
                     },
-                }
-            )
+                )
         finally:
             await proxy.close()
 
@@ -278,7 +282,7 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         events = [frame["tunnel"] for frame in frames]
         self.assertTrue(all(frame["dst"] == plugin.R2_GROUND for frame in frames))
         self.assertEqual(frames[0]["tm"]["tunnel"], events[0])
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 3)
         self.assertEqual(events[0]["kind"], "http.response")
         self.assertEqual(events[0]["status"], 200)
         body = base64.b64decode(events[0]["data"])
@@ -313,6 +317,39 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         await asyncio.wait_for(task, 1)
         self.assertEqual(frame["dst"], plugin.R2_GROUND)
+
+    async def test_atomic_response_repeats_until_ack_without_announce_overlap(self) -> None:
+        tunnel = plugin.R2RemoteTunnel((self.config(),))
+        tunnel._ack_enabled = True
+        writer = MemoryWriter()
+        tunnel.writer = writer
+
+        task = asyncio.create_task(
+            tunnel._tunnel_event(
+                4567,
+                {
+                    "kind": "http.response",
+                    "id": "atomic-ack-test",
+                    "status": 200,
+                    "headers": [],
+                    "data": "",
+                    "compression": "",
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        frame = writer.frames()[0]
+        event = frame["tm"]["tunnel"]
+        self.assertGreater(tunnel._announce_paused_until, time.monotonic())
+        tunnel._handle_ack(
+            {
+                "PT": "plugin.ctl",
+                "cmd": "stabh.ack",
+                "arg": {"id": event["id"], "seq": event["seq"]},
+            }
+        )
+        await asyncio.wait_for(task, 1)
+        self.assertEqual(len(writer.frames()), 1)
 
     async def test_terminal_is_disabled_by_default(self) -> None:
         config = self.config()
@@ -352,21 +389,24 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             f"{request_id}\0{session_id}\0{command}".encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        await tunnel._handle_shell(
-            {
-                "PT": "plugin.ctl",
-                "src": 4567,
-                "cmd": "r2shell.exec",
-                "arg": {
-                    "id": request_id,
-                    "session": session_id,
-                    "command": command,
-                    "auth": signature,
+        with mock.patch.object(plugin, "R2_ATOMIC_REPEATS", 3), mock.patch.object(
+            plugin, "R2_ATOMIC_INTERVAL_SECONDS", 0
+        ):
+            await tunnel._handle_shell(
+                {
+                    "PT": "plugin.ctl",
+                    "src": 4567,
+                    "cmd": "r2shell.exec",
+                    "arg": {
+                        "id": request_id,
+                        "session": session_id,
+                        "command": command,
+                        "auth": signature,
+                    },
                 },
-            }
-        )
+            )
         events = [frame["tunnel"] for frame in writer.frames()]
-        self.assertEqual(len(events), 1)
+        self.assertEqual(len(events), 3)
         self.assertEqual(events[-1]["kind"], "shell.result")
         self.assertEqual(events[-1]["exit_code"], 0)
         self.assertEqual(events[-1]["cwd"], os.path.realpath("/"))

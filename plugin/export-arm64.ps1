@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
-$Image = "koropwnz/stab-r2d2-plugin:0.2.7"
+$Image = "koropwnz/stab-r2d2-plugin:0.2.8"
 $OutputDirectory = Join-Path $PSScriptRoot "dist"
-$OutputFile = Join-Path $OutputDirectory "stabh-web-proxy-0.2.7-arm64.tar"
+$OutputFile = Join-Path $OutputDirectory "stabh-web-proxy-0.2.8-arm64.tar"
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 docker buildx build `
