@@ -42,15 +42,10 @@ class FakeTransport:
         queue = self.pending[argument["id"]]
         await queue.put(
             {
-                "kind": "shell.output",
+                "kind": "shell.result",
                 "id": argument["id"],
                 "data": base64.b64encode(b"terminal-ok\n").decode("ascii"),
-            }
-        )
-        await queue.put(
-            {
-                "kind": "shell.done",
-                "id": argument["id"],
+                "compression": "",
                 "exit_code": 0,
                 "cwd": "/",
                 "timed_out": False,

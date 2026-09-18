@@ -278,14 +278,15 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         events = [frame["tunnel"] for frame in frames]
         self.assertTrue(all(frame["dst"] == plugin.R2_GROUND for frame in frames))
         self.assertEqual(frames[0]["tm"]["tunnel"], events[0])
-        self.assertEqual(events[0]["kind"], "http.head")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["kind"], "http.response")
         self.assertEqual(events[0]["status"], 200)
-        self.assertTrue(events[-1]["eof"])
-        body = b"".join(
-            base64.b64decode(event["data"])
-            for event in events
-            if event["kind"] == "http.body" and event["data"]
-        ).decode("utf-8")
+        body = base64.b64decode(events[0]["data"])
+        if events[0]["compression"] == "zlib":
+            import zlib
+
+            body = zlib.decompress(body)
+        body = body.decode("utf-8")
         self.assertIn("http://127.0.0.1:18080/next", body)
 
     async def test_r2d2_ack_releases_waiting_event(self) -> None:
@@ -365,7 +366,8 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         events = [frame["tunnel"] for frame in writer.frames()]
-        self.assertEqual(events[-1]["kind"], "shell.done")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[-1]["kind"], "shell.result")
         self.assertEqual(events[-1]["exit_code"], 0)
         self.assertEqual(events[-1]["cwd"], os.path.realpath("/"))
         self.assertNotIn(token, json.dumps(writer.frames()))

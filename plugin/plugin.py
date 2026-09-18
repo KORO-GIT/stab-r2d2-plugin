@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import time
+import zlib
 from dataclasses import dataclass
 
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
@@ -33,13 +34,14 @@ CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 HDMI_DIAGNOSTICS_PATH = "/__r2_stabh_proxy/hdmi"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.2.5"
+PLUGIN_VERSION = "0.2.6"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
 R2_ACK_TIMEOUT_SECONDS = 2.0
 R2_ACK_RETRIES = 5
 TUNNEL_CHUNK_BYTES = 24 * 1024
+TUNNEL_ATOMIC_BYTES = 72 * 1024
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -1056,6 +1058,13 @@ class R2RemoteTunnel:
                 "tunnel": wire_payload,
             },
         }
+        # The Internet relay exposes telemetry as a latest-value snapshot.  A
+        # complete response therefore has to be useful on its own: waiting for
+        # an acknowledgement would only keep the plugin task open after the
+        # desktop has already received the final result.
+        if wire_payload.get("kind") in {"http.response", "shell.result"}:
+            await self._send(R2_GROUND, fields)
+            return
         if not self._ack_enabled or not request_id:
             await self._send(R2_GROUND, fields)
             return
@@ -1140,31 +1149,31 @@ class R2RemoteTunnel:
                 if any(content_type.startswith(prefix) for prefix in TEXT_TYPES):
                     data = self._rewrite_remote_text(config, target, data)
                 response_headers = self._remote_response_headers(config, target, response.headers)
+                packed = zlib.compress(data, level=6)
+                if len(packed) < len(data):
+                    wire_data = packed
+                    compression = "zlib"
+                else:
+                    wire_data = data
+                    compression = ""
+                if len(wire_data) > TUNNEL_ATOMIC_BYTES:
+                    await self._tunnel_error(
+                        source,
+                        request_id,
+                        "response is too large for the reliable R2D2 control channel",
+                    )
+                    return
                 await self._tunnel_event(
                     source,
                     {
-                        "kind": "http.head",
+                        "kind": "http.response",
                         "id": request_id,
                         "status": response.status,
                         "reason": response.reason or "",
                         "headers": response_headers,
+                        "data": base64.b64encode(wire_data).decode("ascii"),
+                        "compression": compression,
                     },
-                )
-                for offset in range(0, len(data), TUNNEL_CHUNK_BYTES):
-                    await self._tunnel_event(
-                        source,
-                        {
-                            "kind": "http.body",
-                            "id": request_id,
-                            "data": base64.b64encode(
-                                data[offset : offset + TUNNEL_CHUNK_BYTES]
-                            ).decode("ascii"),
-                            "eof": False,
-                        },
-                    )
-                await self._tunnel_event(
-                    source,
-                    {"kind": "http.body", "id": request_id, "data": "", "eof": True},
                 )
         except Exception as exc:
             proxy.invalidate_target()
@@ -1337,30 +1346,20 @@ class R2RemoteTunnel:
             await self._tunnel_event(
                 source,
                 {
-                    "kind": "shell.output",
+                    "kind": "shell.result",
                     "id": request_id,
                     "data": base64.b64encode(change_output).decode("ascii"),
-                },
-            )
-            await self._tunnel_event(
-                source,
-                {
-                    "kind": "shell.done",
-                    "id": request_id,
                     "exit_code": 0 if not change_output else 1,
                     "cwd": changed if not change_output else cwd,
                     "timed_out": False,
                     "truncated": False,
+                    "compression": "",
                 },
             )
             return
 
         timeout = min(max(float(config.terminal_timeout), 1.0), 60.0)
         maximum = min(max(int(config.terminal_max_output_bytes), 4096), 512 * 1024)
-        await self._tunnel_event(
-            source,
-            {"kind": "shell.start", "id": request_id, "cwd": cwd},
-        )
         log("INFO", "authenticated R2D2 terminal command received")
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1379,31 +1378,23 @@ class R2RemoteTunnel:
             )
             return
         assert process.stdout is not None
-        sent = 0
+        output = bytearray()
         truncated = False
 
         async def forward_output() -> int:
-            nonlocal sent, truncated
+            nonlocal truncated
             while True:
                 chunk = await process.stdout.read(8 * 1024)
                 if not chunk:
                     break
-                remaining = maximum - sent
+                remaining = maximum - len(output)
                 if remaining <= 0:
                     truncated = True
                     continue
                 payload = chunk[:remaining]
-                sent += len(payload)
+                output.extend(payload)
                 if len(payload) < len(chunk):
                     truncated = True
-                await self._tunnel_event(
-                    source,
-                    {
-                        "kind": "shell.output",
-                        "id": request_id,
-                        "data": base64.b64encode(payload).decode("ascii"),
-                    },
-                )
             return await process.wait()
 
         timed_out = False
@@ -1418,11 +1409,25 @@ class R2RemoteTunnel:
                 process.kill()
             exit_code = await process.wait()
 
+        raw_output = bytes(output)
+        packed_output = zlib.compress(raw_output, level=6)
+        if len(packed_output) < len(raw_output):
+            wire_output = packed_output
+            compression = "zlib"
+        else:
+            wire_output = raw_output
+            compression = ""
+        if len(wire_output) > TUNNEL_ATOMIC_BYTES:
+            wire_output = raw_output[:TUNNEL_ATOMIC_BYTES]
+            compression = ""
+            truncated = True
         await self._tunnel_event(
             source,
             {
-                "kind": "shell.done",
+                "kind": "shell.result",
                 "id": request_id,
+                "data": base64.b64encode(wire_output).decode("ascii"),
+                "compression": compression,
                 "exit_code": int(exit_code),
                 "cwd": cwd,
                 "timed_out": timed_out,

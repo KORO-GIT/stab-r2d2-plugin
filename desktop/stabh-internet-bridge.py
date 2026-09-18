@@ -12,6 +12,7 @@ import hmac
 import json
 import uuid
 import webbrowser
+import zlib
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
@@ -344,6 +345,20 @@ class LocalProxy:
             first = await asyncio.wait_for(queue.get(), 45)
             if first.get("kind") == "error":
                 return web.Response(status=502, text=str(first.get("message", "StabX tunnel error")))
+            if first.get("kind") == "http.response":
+                try:
+                    data = base64.b64decode(str(first.get("data", "")), validate=True)
+                    if first.get("compression") == "zlib":
+                        data = zlib.decompress(data)
+                except (ValueError, zlib.error):
+                    return web.Response(status=502, text="Invalid atomic response from StabX tunnel")
+                response = web.Response(
+                    status=int(first.get("status", 502)),
+                    reason=str(first.get("reason", "")),
+                    body=data,
+                )
+                self._copy_response_headers(response, first.get("headers", []))
+                return response
             if first.get("kind") != "http.head":
                 return web.Response(status=502, text="Invalid response from StabX tunnel")
 
@@ -351,12 +366,7 @@ class LocalProxy:
                 status=int(first.get("status", 502)),
                 reason=str(first.get("reason", "")),
             )
-            for item in first.get("headers", []):
-                if not isinstance(item, list) or len(item) != 2:
-                    continue
-                name, value = str(item[0]), str(item[1])
-                if name.lower() not in HOP_BY_HOP:
-                    response.headers.add(name, value)
+            self._copy_response_headers(response, first.get("headers", []))
             await response.prepare(request)
             while True:
                 event = await asyncio.wait_for(queue.get(), 45)
@@ -375,6 +385,17 @@ class LocalProxy:
             return web.Response(status=504, text=str(exc) or "StabX tunnel timeout")
         finally:
             self.transport.unregister(request_id)
+
+    @staticmethod
+    def _copy_response_headers(response: web.StreamResponse, headers: object) -> None:
+        if not isinstance(headers, list):
+            return
+        for item in headers:
+                if not isinstance(item, list) or len(item) != 2:
+                    continue
+                name, value = str(item[0]), str(item[1])
+                if name.lower() not in HOP_BY_HOP:
+                    response.headers.add(name, value)
 
     async def _websocket(self, request: web.Request) -> web.StreamResponse:
         request_id = uuid.uuid4().hex
@@ -543,6 +564,21 @@ class TerminalProxy:
                         chunks.append(base64.b64decode(str(event.get("data", "")), validate=True))
                     except ValueError:
                         return web.json_response({"error": "invalid terminal output"}, status=502)
+                if kind == "shell.result":
+                    try:
+                        data = base64.b64decode(str(event.get("data", "")), validate=True)
+                        if event.get("compression") == "zlib":
+                            data = zlib.decompress(data)
+                        chunks.append(data)
+                    except (ValueError, zlib.error):
+                        return web.json_response({"error": "invalid terminal output"}, status=502)
+                    result.update(
+                        exit_code=int(event.get("exit_code", -1)),
+                        cwd=str(event.get("cwd", result["cwd"])),
+                        timed_out=bool(event.get("timed_out")),
+                        truncated=bool(event.get("truncated")),
+                    )
+                    break
                 if kind == "shell.done":
                     result.update(
                         exit_code=int(event.get("exit_code", -1)),
