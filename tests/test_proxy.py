@@ -9,6 +9,7 @@ import struct
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from aiohttp import ClientSession, WSMsgType, web
 
@@ -37,6 +38,14 @@ class MemoryWriter:
             result.append(json.loads(data[4 : 4 + length]))
             data = data[4 + length :]
         return result
+
+
+class FakeDiagnosticProcess:
+    returncode = 0
+    pid = 12345
+
+    async def communicate(self) -> tuple[bytes, None]:
+        return b"diagnostic-ok\n", None
 
 
 class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -131,6 +140,57 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(base + "/next", body)
             self.assertIn(f"ws://127.0.0.1:{self.proxy_port}/ws", body)
             self.assertNotIn(f"127.0.0.1:{self.upstream_port}", body)
+
+    async def test_expired_discovered_target_is_reprobed(self) -> None:
+        config = self.config(
+            TARGET_HOSTS="pizero2.invalid",
+            AUTO_DISCOVER=True,
+            DISCOVERY_INTERVAL=60,
+        )
+        proxy = plugin.StabXProxy(config)
+        discovered = plugin.Target("pizero2", "10.0.0.139", config.target_port)
+        proxy._target = discovered
+        proxy._target_until = 0.0
+        proxy._next_discovery = float("inf")
+
+        probe = mock.AsyncMock(return_value=True)
+        discover = mock.AsyncMock(return_value=None)
+        with mock.patch.object(proxy, "_probe_address", probe), mock.patch.object(
+            proxy, "_discover_target", discover
+        ):
+            resolved = await proxy.resolve_target()
+
+        self.assertIs(resolved, discovered)
+        probe.assert_awaited_once_with(discovered.address)
+        discover.assert_not_awaited()
+        self.assertGreater(proxy._target_until, 0.0)
+
+    async def test_hdmi_diagnostics_requires_terminal_token(self) -> None:
+        token = "diagnostic-token-1234567890"
+        runner, port = await self.start_proxy(
+            TERMINAL_ENABLED=True,
+            TERMINAL_TOKEN=token,
+        )
+        base = f"http://127.0.0.1:{port}"
+        try:
+            async with self.client.get(base + plugin.HDMI_DIAGNOSTICS_PATH) as response:
+                self.assertEqual(response.status, 401)
+
+            create_process = mock.AsyncMock(return_value=FakeDiagnosticProcess())
+            with mock.patch.object(plugin.asyncio, "create_subprocess_exec", create_process):
+                async with self.client.get(
+                    base + plugin.HDMI_DIAGNOSTICS_PATH,
+                    headers={"Authorization": f"Bearer {token}"},
+                ) as response:
+                    body = await response.text()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn("diagnostic-ok", body)
+                    self.assertIn("exit_code=0", body)
+                command = create_process.await_args.args[2]
+                self.assertIn("--query-dv-timings", command)
+                self.assertIn("--get-edid", command)
+        finally:
+            await runner.cleanup()
 
     async def test_post_redirect_and_websocket(self) -> None:
         base = f"http://127.0.0.1:{self.proxy_port}"

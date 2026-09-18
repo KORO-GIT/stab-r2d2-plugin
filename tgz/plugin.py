@@ -31,8 +31,9 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector, WSMsgType, web
 
 CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
+HDMI_DIAGNOSTICS_PATH = "/__r2_stabh_proxy/hdmi"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
@@ -65,6 +66,96 @@ PRIVATE_NETWORKS = tuple(
     ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
 DISCOVERED_ADDRESSES: set[str] = set()
+
+HDMI_DIAGNOSTIC_COMMAND = r"""
+set +e
+echo '===== R2D2 HDMI / CSI DIAGNOSTICS ====='
+date -Iseconds 2>/dev/null || date
+printf 'model: '
+tr -d '\000' </proc/device-tree/model 2>/dev/null || echo unavailable
+echo
+uname -a
+printf 'temperature_mC: '
+cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null || echo unavailable
+
+echo '===== VIDEO DEVICE NODES ====='
+ls -la /dev/video* /dev/media* /dev/v4l-subdev* 2>&1
+
+echo '===== VIDEO SYSFS ====='
+found=0
+for node in /sys/class/video4linux/*; do
+    [ -e "$node" ] || continue
+    found=1
+    printf '%s name=' "$node"
+    cat "$node/name" 2>/dev/null || echo unavailable
+    readlink -f "$node/device" 2>/dev/null || true
+done
+[ "$found" -eq 1 ] || echo 'no /sys/class/video4linux devices'
+
+echo '===== I2C DEVICES ====='
+found=0
+for name in /sys/bus/i2c/devices/*/name; do
+    [ -e "$name" ] || continue
+    value=$(cat "$name" 2>/dev/null)
+    case "$value" in
+        *tc358743*|*unicam*|*adv72*|*bcm2835*)
+            found=1
+            printf '%s: %s\n' "${name%/name}" "$value"
+            ;;
+    esac
+done
+[ "$found" -eq 1 ] || echo 'no matching I2C device names visible'
+
+echo '===== KERNEL MODULES ====='
+if command -v lsmod >/dev/null 2>&1; then
+    lsmod | grep -Ei 'tc358743|unicam|adv718|bcm2835' || true
+else
+    echo 'lsmod unavailable'
+fi
+
+echo '===== V4L2 DEVICE LIST ====='
+if command -v v4l2-ctl >/dev/null 2>&1; then
+    v4l2-ctl --list-devices 2>&1
+else
+    echo 'v4l2-ctl unavailable'
+fi
+
+echo '===== V4L2 HDMI STATUS ====='
+if command -v v4l2-ctl >/dev/null 2>&1; then
+    for device in /dev/video* /dev/v4l-subdev*; do
+        [ -e "$device" ] || continue
+        echo "----- $device DRIVER -----"
+        v4l2-ctl -d "$device" --info 2>&1 || true
+        echo "----- $device DV TIMINGS -----"
+        v4l2-ctl -d "$device" --query-dv-timings 2>&1 || true
+        echo "----- $device EDID -----"
+        v4l2-ctl -d "$device" --get-edid 2>&1 || true
+        echo "----- $device CONTROLS / FORMAT -----"
+        v4l2-ctl -d "$device" --all 2>&1 || true
+    done
+fi
+
+echo '===== MEDIA GRAPH ====='
+if command -v media-ctl >/dev/null 2>&1; then
+    found=0
+    for device in /dev/media*; do
+        [ -e "$device" ] || continue
+        found=1
+        echo "----- $device -----"
+        media-ctl -d "$device" -p 2>&1 || true
+    done
+    [ "$found" -eq 1 ] || echo 'no /dev/media devices'
+else
+    echo 'media-ctl unavailable'
+fi
+
+echo '===== KERNEL VIDEO LOG ====='
+if command -v dmesg >/dev/null 2>&1; then
+    dmesg 2>&1 | grep -Ei 'tc358743|unicam|csi|hdmi|video|i2c|under.?voltage|watchdog' | tail -n 240
+else
+    echo 'dmesg unavailable'
+fi
+"""
 
 
 def log(level: str, message: str) -> None:
@@ -344,6 +435,17 @@ class StabXProxy:
             if not force and self._target is not None and now < self._target_until:
                 return self._target
 
+            # Auto-discovered hosts often have no working DNS name.  Keep the
+            # last discovered address alive by probing it again after the
+            # short cache expires.  Otherwise the proxy drops a healthy target
+            # until the longer discovery interval permits another subnet scan.
+            previous_target = self._target
+            if previous_target is not None and await self._probe_address(
+                previous_target.address
+            ):
+                self._target_until = time.monotonic() + self.config.dns_cache_seconds
+                return previous_target
+
             loop = asyncio.get_running_loop()
             for hostname in self.config.target_hosts:
                 try:
@@ -459,6 +561,63 @@ class StabXProxy:
             text="Proxy authentication required",
             headers={"WWW-Authenticate": 'Basic realm="StabX through R2D2"'},
         )
+
+    def _diagnostics_authorized(self, request: web.Request) -> bool:
+        token = self.config.terminal_token
+        if not self.config.terminal_enabled or len(token) < 24:
+            return False
+        supplied = request.headers.get("Authorization", "")
+        return hmac.compare_digest(supplied, f"Bearer {token}")
+
+    async def hdmi_diagnostics(self, request: web.Request) -> web.Response:
+        if not self._diagnostics_authorized(request):
+            return web.Response(
+                status=401,
+                text="Valid TERMINAL_TOKEN bearer authorization is required\n",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        maximum = min(max(int(self.config.terminal_max_output_bytes), 4096), 512 * 1024)
+        timeout = min(max(float(self.config.terminal_timeout), 5.0), 60.0)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-lc",
+                HDMI_DIAGNOSTIC_COMMAND,
+                stdin=subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
+            )
+            try:
+                output, _ = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                timed_out = False
+            except asyncio.TimeoutError:
+                timed_out = True
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                output, _ = await process.communicate()
+            truncated = len(output) > maximum
+            output = output[:maximum]
+            footer = (
+                f"\n===== RESULT =====\nexit_code={process.returncode} "
+                f"timed_out={str(timed_out).lower()} "
+                f"truncated={str(truncated).lower()}\n"
+            ).encode("utf-8")
+            return web.Response(
+                body=output + footer,
+                content_type="text/plain",
+                charset="utf-8",
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:
+            log("ERROR", f"HDMI diagnostics failed: {type(exc).__name__}")
+            return web.Response(
+                status=500,
+                text=f"HDMI diagnostics failed: {type(exc).__name__}\n",
+                headers={"Cache-Control": "no-store"},
+            )
 
     def _upstream_headers(self, request: web.Request, target: Target) -> dict[str, str]:
         headers: dict[str, str] = {}
@@ -1225,6 +1384,7 @@ def create_app(config: Config) -> web.Application:
     proxy = StabXProxy(config)
     app = web.Application(client_max_size=1024 * 1024 * 1024)
     app.router.add_route("*", STATUS_PATH, proxy.status)
+    app.router.add_get(HDMI_DIAGNOSTICS_PATH, proxy.hdmi_diagnostics)
     app.router.add_route("*", "/{path:.*}", proxy.handle)
 
     async def startup(_: web.Application) -> None:

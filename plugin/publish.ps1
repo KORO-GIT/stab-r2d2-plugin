@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $Image = "koropwnz/stab-r2d2-plugin"
-$Version = "0.2.0"
+$Version = "0.2.1"
 $FullTag = "${Image}:${Version}"
 
 docker buildx inspect --bootstrap | Out-Null

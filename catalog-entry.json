@@ -12,10 +12,10 @@
   },
   "versions": [
     {
-      "version": "0.2.0",
-      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.2.0/stabh-r2d2-plugin-0.2.0.tgz",
+      "version": "0.2.1",
+      "url": "https://github.com/KORO-GIT/stab-r2d2-plugin/releases/download/v0.2.1/stabh-r2d2-plugin-0.2.1.tgz",
       "description": "Два веб-проксі StabX і захищена токеном командна консоль Raspberry Pi R2D2 через штатний Інтернет-канал.",
-      "whatsNew": "Додано термінал R2D2 на локальній адресі 127.0.0.1:18081, готові діагностики HDMI/CSI, системи, мережі та відеосервісів. Команди підписуються HMAC-SHA256; секретний токен не передається в журналі R2D2.",
+      "whatsNew": "Виправлено втрату автоматично знайденої адреси StabX після завершення короткого DNS-кешу. Додано захищену діагностику HDMI/CSI через термінальний токен.",
       "configSchema": {
         "type": "object",
         "additionalProperties": false,
