@@ -275,6 +275,7 @@ class ProxyIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         frames = writer.frames()
         events = [frame["tunnel"] for frame in frames]
+        self.assertTrue(all(frame["dst"] == plugin.R2_GROUND for frame in frames))
         self.assertEqual(frames[0]["tm"]["tunnel"], events[0])
         self.assertEqual(events[0]["kind"], "http.head")
         self.assertEqual(events[0]["status"], 200)

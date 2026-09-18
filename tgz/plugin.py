@@ -33,7 +33,7 @@ CONFIG_PATH = os.environ.get("R2_CONFIG", "/app/config.json")
 STATUS_PATH = "/__r2_stabh_proxy/status"
 HDMI_DIAGNOSTICS_PATH = "/__r2_stabh_proxy/hdmi"
 PLUGIN_LABEL = "koropwnz.stab-r2d2-plugin"
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.2.3"
 R2_SOCKET_PATH = "/tmp/R2D2.socket"
 R2_GROUND = 1000
 R2_MAX_FRAME = 128 * 1024
@@ -1014,8 +1014,13 @@ class R2RemoteTunnel:
         # Current R2D2 Internet relays forward plugin telemetry (`tm`) but may
         # discard unknown top-level fields.  Keep the original top-level field
         # for direct/older bridges and mirror it into `tm` for the real relay.
+        # The Internet relay rewrites the request source, so replying to that
+        # transient value can route the answer back into an onboard service.
+        # Endpoint 1000 is the documented ground-station broadcast endpoint;
+        # request IDs ensure that only the requesting desktop bridge consumes
+        # the response.
         await self._send(
-            destination,
+            R2_GROUND,
             {
                 "tunnel": payload,
                 "tm": {
